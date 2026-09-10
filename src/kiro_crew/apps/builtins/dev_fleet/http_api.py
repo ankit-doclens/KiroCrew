@@ -11,7 +11,14 @@ from pathlib import Path
 
 from aiohttp import web
 
-from kiro_crew.apps.builtins.dev_fleet import fleet_state, live, repository, runtime, worktree_ops
+from kiro_crew.apps.builtins.dev_fleet import (
+    fleet_state,
+    live,
+    release_channel_pin,
+    repository,
+    runtime,
+    worktree_ops,
+)
 from kiro_crew.apps.proxy_auth import raw_request_target
 
 # --- standalone backend config ---
@@ -153,13 +160,21 @@ async def api_dev_fleet_disk(request: web.Request) -> web.Response:
     return web.json_response(await fleet_state._disk())
 
 
-def _audited(tool_name: str):
+def _audited(tool_name: str, *, target_keys: tuple[str, ...] = ("name", "names", "path")):
     """Audit every Dev Fleet mutation via SEL, exactly once per request.
 
     The decision is made at the single response boundary of the handler:
     2xx -> success, 4xx -> denied, 5xx/exception -> failure.  Target
     worktree name is read from the JSON body without consuming the stream
     (handlers re-parse independently); values are redacted before logging.
+
+    ``target_keys`` is per ROUTE, and that is the whole point: a first-match
+    scan over the union of every route's target field lets a body carry a key
+    this route ignores and have the trail record it. A `/release-channel/*`
+    request is `{lane}`, so one carrying a stray `name` would be audited as a
+    mutation against that name while the handler acted on the lane — a
+    tamper-evident record naming a target nothing touched. Each route declares
+    only the field it actually reads.
     """
 
     def _decorate(handler):
@@ -171,7 +186,14 @@ def _audited(tool_name: str):
                     try:
                         parsed = json.loads(raw)
                         if isinstance(parsed, dict):
-                            t = parsed.get("name") or parsed.get("names") or parsed.get("path")
+                            t = next(
+                                (
+                                    parsed[k]
+                                    for k in target_keys
+                                    if parsed.get(k) not in (None, "", [])
+                                ),
+                                None,
+                            )
                             if isinstance(t, str):
                                 target = t
                             elif isinstance(t, list):
@@ -480,6 +502,41 @@ async def api_dev_fleet_pod_provision_dismiss(request: web.Request) -> web.Respo
 @_audited("dev_fleet_rebase")
 async def api_dev_fleet_rebase(request: web.Request) -> web.Response:
     return await _pod_name_action(request, worktree_ops._rebase)
+
+
+async def _lane_action(request: web.Request, action) -> web.Response:
+    """Helper: validate ``lane`` against the published set, call ``action(lane)``.
+
+    The lane is REJECTED rather than sanitized, matching
+    ``update_layout.set_release_channel``: it selects a git ref and names a
+    worktree directory, so an unvalidated value would reach both. Validating
+    here as well as in the op is deliberate — the op is also reachable from the
+    fleet's own code paths, and neither layer should assume the other ran.
+    """
+    body, err = await _json_body(request, code="invalid_body")
+    if err is not None:
+        return err
+    assert body is not None
+    lane = body.get("lane")
+    if not isinstance(lane, str) or lane not in release_channel_pin.LANES:
+        return web.json_response(
+            {
+                "error": ("'lane' must be one of " f"{', '.join(release_channel_pin.LANES)}"),
+                "code": "invalid_release_channel",
+            },
+            status=400,
+        )
+    return web.json_response(await action(lane))
+
+
+@_audited("dev_fleet_release_channel_create", target_keys=("lane",))
+async def api_dev_fleet_release_channel_create(request: web.Request) -> web.Response:
+    return await _lane_action(request, worktree_ops._release_channel_create)
+
+
+@_audited("dev_fleet_release_channel_advance", target_keys=("lane",))
+async def api_dev_fleet_release_channel_advance(request: web.Request) -> web.Response:
+    return await _lane_action(request, worktree_ops._release_channel_advance)
 
 
 # =============================================================================

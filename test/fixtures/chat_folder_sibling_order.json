@@ -1,0 +1,103 @@
+{
+  "$comment": [
+    "ONE golden fixture for the sibling sort, consumed by BOTH suites:",
+    "  - pytest  test/test_mcp_dashboard_folders.py  (_chat_folder_siblings)",
+    "  - vitest  website/src/test/folderTree.test.ts (bySidebarOrder)",
+    "",
+    "The tool and the sidebar must order siblings identically, because",
+    "chat_folder_tree is where an agent reads the sequence it then names a",
+    "before/after anchor in, so an anchor is only correct while the two agree.",
+    "This file is the single artifact that agreement is checked against:",
+    "divergence on EITHER side fails here.",
+    "",
+    "Add a row rather than a per-side test when a new coercion question comes up.",
+    "Every value below is one JSON can actually hold, because the folder store is",
+    "read with a bare json.loads / JSON.parse and never schema-checked on the way",
+    "out."
+  ],
+  "cases": [
+    {
+      "name": "order decides before name",
+      "rows": [
+        { "id": "r2", "name": "aaa", "order": 2 },
+        { "id": "r0", "name": "zzz", "order": 0 },
+        { "id": "r1", "name": "mmm", "order": 1 }
+      ],
+      "expected": ["r0", "r1", "r2"]
+    },
+    {
+      "name": "a missing order key sorts as 0, not as name-only",
+      "rows": [
+        { "id": "has1", "name": "aaa", "order": 1 },
+        { "id": "none", "name": "zzz" },
+        { "id": "hasneg", "name": "mmm", "order": -1 }
+      ],
+      "expected": ["hasneg", "none", "has1"]
+    },
+    {
+      "name": "duplicate orders fall through to the name tie-break",
+      "rows": [
+        { "id": "dup_b", "name": "Beta", "order": 5 },
+        { "id": "dup_a", "name": "alpha", "order": 5 },
+        { "id": "dup_c", "name": "Gamma", "order": 5 }
+      ],
+      "expected": ["dup_a", "dup_b", "dup_c"]
+    },
+    {
+      "name": "the tie-break lowercases rather than casefolding, so strasse sorts after strasze",
+      "$why": "casefold() maps ss to ss and would order these the other way round; JS toLowerCase does not, so Python must not either",
+      "rows": [
+        { "id": "sharp", "name": "stra\u00dfe", "order": 0 },
+        { "id": "sz", "name": "strasze", "order": 0 }
+      ],
+      "expected": ["sz", "sharp"]
+    },
+    {
+      "name": "an astral name compares by UTF-16 code unit, not code point",
+      "$why": "emoji are astral and this repo auto-generates emoji folder icons, so this row is ordinary. U+1F600 is 0xD83D,0xDE00 in UTF-16 but 0x1F600 as a code point, and U+FFFD sits between the two orderings",
+      "rows": [
+        { "id": "astral", "name": "\ud83d\ude00 work", "order": 0 },
+        { "id": "bmp_high", "name": "\ufffd zzz", "order": 0 }
+      ],
+      "expected": ["astral", "bmp_high"]
+    },
+    {
+      "name": "a lone surrogate is a name, not a crash",
+      "$why": "persisted JSON can hold an unpaired surrogate; a raise here aborts the whole sort and every folder tool with it",
+      "$note": "name_code_units builds the string from UTF-16 units on both sides. A raw \\ud800 escape is legal JSON but strict parsers (Vite's) reject an unpaired surrogate, so the value cannot travel as a JSON string.",
+      "rows": [
+        { "id": "lone", "name_code_units": [97, 55296, 98], "order": 0 },
+        { "id": "plain", "name": "b", "order": 0 }
+      ],
+      "expected": ["lone", "plain"]
+    },
+    {
+      "name": "a non-string name coerces falsily on both sides",
+      "$why": "Python str(x or '') empties false/0; JS must use || not ?? to agree",
+      "rows": [
+        { "id": "false_name", "name": false, "order": 0 },
+        { "id": "zero_name", "name": 0, "order": 0 },
+        { "id": "real_name", "name": "a", "order": 0 }
+      ],
+      "expected": ["false_name", "zero_name", "real_name"]
+    },
+    {
+      "name": "a junk order reads as 0 on both sides",
+      "$why": "int('abc') raises in Python and is caught to 0; 'abc' - 0 is NaN in JS, which silently unsorts a comparator unless guarded",
+      "rows": [
+        { "id": "junk_str", "name": "aaa", "order": "abc" },
+        { "id": "real_two", "name": "bbb", "order": 2 },
+        { "id": "junk_null", "name": "ccc", "order": null }
+      ],
+      "expected": ["junk_str", "junk_null", "real_two"]
+    },
+    {
+      "name": "a numeric string order is read as that number on both sides",
+      "rows": [
+        { "id": "str_three", "name": "aaa", "order": "3" },
+        { "id": "int_one", "name": "bbb", "order": 1 }
+      ],
+      "expected": ["int_one", "str_three"]
+    }
+  ]
+}

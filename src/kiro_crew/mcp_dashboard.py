@@ -128,7 +128,11 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "description": (
                 "Show the user's SIDEBAR folder tree — the folders they organize "
                 "their chat sessions in — with the live sessions filed in each one. "
-                "Returns per folder: id, human path, project directory, default "
+                "Folders are listed in the SAME ORDER the sidebar draws them (each "
+                "parent's children in their stored order), so the sequence you read "
+                "here is the one the person sees — which is what makes it safe to "
+                "pick a ``before``/``after`` anchor for chat_folder_move. Returns per "
+                "folder: id, human path, project directory, default "
                 "agent, and how many archived (history) sessions are filed there; "
                 "then one line per live session (slot key + title) nested under it, "
                 "and an '(unfiled)' group for sessions at the top level. Use this to "
@@ -172,14 +176,22 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "chat_folder_move",
             "description": (
-                "Reparent a sidebar folder — nest it under another folder, or move it "
-                "back to the top level. Moves the folder with everything in it "
-                "(sessions and subfolders travel with it); nothing is deleted. "
-                "Cycle-guarded: a folder cannot become its own descendant. "
-                "``folder`` and ``new_parent`` are each a folder id or human path; "
-                "omit ``new_parent`` (or pass 'root') for the top level. An app agent "
-                "may move only a folder it created itself, and only to the top level "
-                "or under another of its own."
+                "Reparent a sidebar folder AND/OR set its position among its "
+                "siblings — nest it under another folder, move it back to the top "
+                "level, or just slide it up or down where it already is. Moves the "
+                "folder with everything in it (sessions and subfolders travel with "
+                "it); nothing is deleted. Cycle-guarded: a folder cannot become its "
+                "own descendant. ``folder`` and ``new_parent`` are each a folder id "
+                "or human path; omit ``new_parent`` (or pass 'root') for the top "
+                "level. For POSITION pass ``before`` or ``after`` (not both) naming "
+                "a SIBLING folder to sit next to — with an anchor and no "
+                "``new_parent`` the anchor chooses the parent, which is how you "
+                "reorder a folder without moving it. chat_folder_tree lists folders "
+                "in the same order the sidebar draws them, so read it first to pick "
+                "the anchor. An app agent may move only a folder it created itself, "
+                "and only to the top level or under another of its own; positioning "
+                "is refused outright when it would renumber siblings the app does "
+                "not own."
             ),
             "inputSchema": {
                 "type": "object",
@@ -188,6 +200,20 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     "new_parent": {
                         "type": "string",
                         "description": "Destination parent folder (id or path). Omit / 'root' for top level.",
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": (
+                            "Sit immediately BEFORE this sibling folder (id or path). "
+                            "Mutually exclusive with 'after'."
+                        ),
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": (
+                            "Sit immediately AFTER this sibling folder (id or path). "
+                            "Mutually exclusive with 'before'."
+                        ),
                     },
                 },
                 "required": ["folder"],
@@ -460,6 +486,140 @@ def _chat_folder_children(folders: list[dict], parent_id: str, name: str) -> lis
         if str(f.get("parent_id") or "") == parent_id
         and str(f.get("name", "")).strip().lower() == target
     ]
+
+
+def _chat_folder_order(folder: dict) -> int:
+    """A folder's sidebar sort position, coerced. Missing or junk reads as 0.
+
+    The endpoint stores whatever int a PATCH hands it and never renumbers, so a
+    row can carry a duplicate order, a gap, or (from an older store) no ``order``
+    key at all. The sidebar tolerates all three; so must every reader here.
+
+    ``OverflowError`` is caught alongside the type errors because the folder store
+    is read with a bare ``json.loads``, and JSON's ``1e999`` parses to ``inf`` —
+    which ``int()`` rejects with neither ``TypeError`` nor ``ValueError``. This is
+    a SORT KEY, so an escaping exception aborts the whole sort and takes down every
+    folder tool rather than one row. ``api_chat_folder_update`` guards the same
+    three for the same reason on the way in.
+    """
+    try:
+        return int(folder.get("order") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _chat_folder_name_key(folder: dict) -> bytes:
+    """A folder name as the frontend's ``<`` would compare it.
+
+    Two coercions, both to match ``folderTree.bySidebarOrder`` exactly, because
+    ``chat_folder_tree`` is where an agent picks a ``before``/``after`` anchor and a
+    sequence that differs from the rendered one aims the anchor at the wrong gap.
+
+    ``lower()`` rather than ``casefold()``: casefold is the more thorough fold and
+    that is the problem, since it maps ``\u00df`` to ``ss`` where JavaScript's
+    ``toLowerCase`` leaves it.
+
+    ``utf-16-be`` rather than the str itself: Python orders str by CODE POINT while
+    JavaScript orders by UTF-16 CODE UNIT, and the two disagree above U+FFFF — an
+    astral character's surrogates start at 0xD800, so Python sorts U+1F600 after
+    U+FF21 and JavaScript sorts it before. Comparing the big-endian UTF-16 bytes is
+    code-unit order.
+
+    ``surrogatepass`` because a folder name is persisted JSON and can hold a LONE
+    surrogate, which the strict codec refuses outright — and a raised encoder
+    inside a sort key takes down every folder tool, not one row. Passing it through
+    also keeps the byte-for-byte match: a JavaScript string holds that same lone
+    unit and compares it as 0xD800, which is exactly what these bytes carry.
+    """
+    return str(folder.get("name") or "").lower().encode("utf-16-be", "surrogatepass")
+
+
+def _chat_folder_siblings(folders: list[dict], parent_id: str) -> list[dict]:
+    """Direct children of ``parent_id``, in the order the sidebar renders them.
+
+    The comparator mirrors the sidebar's own (``folderTree.bySidebarOrder`` sorts
+    each parent's children by ``order`` then name), because a caller saying "put
+    this after that" means after what the PERSON SEES. Sorting by ``order`` alone
+    would disagree with the rendered list wherever two siblings share a number,
+    which the store permits.
+
+    The name key is ``lower()``, not ``casefold()``, to match the comparator on
+    the other side exactly. ``casefold`` is the more thorough fold and that is the
+    problem: it maps ``ß`` to ``ss`` where JavaScript's ``toLowerCase`` leaves it,
+    so two equal-order siblings would order one way for the tool and the other way
+    for the sidebar.
+    """
+    kids = [f for f in folders if f.get("id") and str(f.get("parent_id") or "") == parent_id]
+    return sorted(kids, key=lambda f: (_chat_folder_order(f), _chat_folder_name_key(f)))
+
+
+def _chat_folder_render_order(folders: list[dict]) -> list[tuple[str, int]]:
+    """``(folder_id, depth)`` in sidebar render order — pre-order, siblings by order.
+
+    Depth-first from the top level, so a child always follows its parent, which
+    is the shape the sidebar draws. Two defences the sidebar also carries: a row
+    whose ``parent_id`` names a folder absent from this list renders at the top
+    level rather than being dropped, and a parent cycle can neither loop the walk
+    nor swallow the folders caught in it (those are appended at the end).
+    """
+    known = {str(f.get("id") or "") for f in folders if f.get("id")}
+    by_parent: dict[str, list[dict]] = {}
+    for folder in folders:
+        if not folder.get("id"):
+            continue
+        parent = str(folder.get("parent_id") or "")
+        by_parent.setdefault(parent if parent in known else "", []).append(folder)
+    for kids in by_parent.values():
+        kids.sort(key=lambda f: (_chat_folder_order(f), _chat_folder_name_key(f)))
+
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    # Iterative walk: the store caps folder COUNT but not nesting depth, and a
+    # recursive descent would answer a deep chain with a RecursionError.
+    stack: list[tuple[str, int]] = [
+        (str(f.get("id") or ""), 0) for f in reversed(by_parent.get("", []))
+    ]
+    while stack:
+        fid, depth = stack.pop()
+        if not fid or fid in seen:
+            continue
+        seen.add(fid)
+        out.append((fid, depth))
+        stack.extend((str(f.get("id") or ""), depth + 1) for f in reversed(by_parent.get(fid, [])))
+    for folder in folders:
+        fid = str(folder.get("id") or "")
+        if fid and fid not in seen:
+            seen.add(fid)
+            out.append((fid, 0))
+    return out
+
+
+def _free_slot_order(siblings: list[dict], index: int) -> int | None:
+    """An unused ``order`` that lands a folder at ``index``, or ``None`` if none fits.
+
+    Positioning a folder means writing several rows when the siblings have to be
+    renumbered, and several writes cannot be made atomic from here — so the cheap
+    case is worth taking whenever the store already has room: before the first
+    sibling, after the last, or in a gap between two adjacent ones. Then the whole
+    reposition is ONE write and cannot land half-applied.
+
+    ``siblings`` is the destination's children WITHOUT the folder being placed, in
+    render order. ``None`` means the neighbours are adjacent integers, which is
+    what a sidebar drag leaves behind, and the caller must renumber instead.
+    """
+    if not siblings:
+        return 0
+    if index <= 0:
+        return _chat_folder_order(siblings[0]) - 1
+    if index >= len(siblings):
+        return _chat_folder_order(siblings[-1]) + 1
+    low = _chat_folder_order(siblings[index - 1])
+    high = _chat_folder_order(siblings[index])
+    # Equal or inverted neighbours leave no room either: the pair is already
+    # separated only by the name tie-break, which no order value can get between.
+    if high - low >= 2:
+        return low + (high - low) // 2
+    return None
 
 
 def _ambiguous_segment_error(seg: str, matches: list[dict]) -> str:
@@ -813,8 +973,8 @@ def _visible_chat_slots() -> tuple[list[dict], str | None]:
     return [r for r in live if str(r.get("app") or "") == scope], None
 
 
-def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str | None]:
-    """``(verified_caller_key, error)`` — the key to WRITE under, or why not.
+def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str, str | None]:
+    """``(verified_caller_key, caller_app, error)`` — how to WRITE, or why not.
 
     Folders now carry an owner (``chat_folders._folder_owner_app``), so an app
     HAS a folder of its own to write to and the endpoint bounds each write to
@@ -837,6 +997,12 @@ def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str | None]:
     app-owned session the walk landing on an ancestor makes the write arrive at
     the endpoint looking like the unconfined person. Every caller of this gate
     must pass what it returns straight to the write.
+
+    ``caller_app`` (``""`` for the person) comes back for the same reason: it is
+    the identity the endpoint will judge each write against, and a caller that
+    must issue SEVERAL writes to keep one call atomic can only check them all up
+    front by holding it. Re-deriving it would mean a second ``/api/chat/slots``
+    fetch, against a roster that may have changed.
     """
     caller_key, strict_err = require_strict_session_key(
         f"Error: cannot verify which session is calling, so {verb} is "
@@ -845,16 +1011,20 @@ def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str | None]:
         server=SERVER_NAME,
     )
     if not caller_key:
-        return "", strict_err
+        return "", "", strict_err
     rows, err = _get_rows("/api/chat/slots")
     if err:
-        return "", f"Error: {err}"
+        return "", "", f"Error: {err}"
     scope = _caller_app_scope(caller_key, rows)
     if scope is None:
-        return "", (
-            f"Error: cannot establish what this caller is allowed to change, so "
-            f"{verb} is refused — a subagent or a scheduled job runs on behalf of "
-            "whatever created it and cannot be granted more than that."
+        return (
+            "",
+            "",
+            (
+                f"Error: cannot establish what this caller is allowed to change, so "
+                f"{verb} is refused — a subagent or a scheduled job runs on behalf of "
+                "whatever created it and cannot be granted more than that."
+            ),
         )
     if scope and not caller_key.startswith("dashboard:"):
         # An app-owned LINKED session -- a channel- or cron-bound slot runs its
@@ -871,13 +1041,17 @@ def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str | None]:
         # closed" from "no app owns this caller", and would read the second and
         # apply the person's authority. THIS layer can tell, because it resolved
         # the scope positively a moment ago, so the refusal belongs here.
-        return "", (
-            f"Error: {verb} is refused for a channel- or schedule-bound session "
-            "owned by an app — its identity cannot be re-verified at the point of "
-            "the write, so the folder rules could not be bounded to it. Run this "
-            "from the app's own dashboard session."
+        return (
+            "",
+            "",
+            (
+                f"Error: {verb} is refused for a channel- or schedule-bound session "
+                "owned by an app — its identity cannot be re-verified at the point of "
+                "the write, so the folder rules could not be bounded to it. Run this "
+                "from the app's own dashboard session."
+            ),
         )
-    return caller_key, None
+    return caller_key, scope, None
 
 
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
@@ -920,7 +1094,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             # reach the same write by naming the path here. The gate's
             # verified key is what the segment creation writes under, per its
             # own contract.
-            gate_key, gate = _refuse_tree_shaping_if_unverifiable(
+            gate_key, _gate_app, gate = _refuse_tree_shaping_if_unverifiable(
                 "filing a new session at creation"
             )
             if gate:
@@ -1120,9 +1294,12 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             f"{'' if len(chat_folders) == 1 else 's'}, {len(chat_slots)} live session"
             f"{'' if len(chat_slots) == 1 else 's'}:"
         ]
-        for fid, fpath in sorted(tree_paths.items(), key=lambda kv: kv[1].lower()):
+        # Sidebar ORDER, not alphabetical. This tool is how an agent reads the
+        # tree before repositioning a folder, so listing it by path would show a
+        # sequence the person never sees and make `before`/`after` a guess.
+        for fid, depth in _chat_folder_render_order(chat_folders):
+            fpath = tree_paths.get(fid, "?")
             row = next((f for f in chat_folders if str(f.get("id")) == fid), {})
-            depth = fpath.count("/")
             meta_bits = []
             if row.get("project_dir"):
                 meta_bits.append(f"project={row['project_dir']}")
@@ -1152,7 +1329,7 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
 
     if name == "chat_folder_create":
         args = validate_tool_args(args, CHAT_FOLDER_CREATE_SCHEMA)
-        caller_key, gate = _refuse_tree_shaping_if_unverifiable("creating a folder")
+        caller_key, _caller_app, gate = _refuse_tree_shaping_if_unverifiable("creating a folder")
         if gate:
             return gate
         # A '/' in a NAME is what makes a rendered path ambiguous (a folder named
@@ -1210,9 +1387,13 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
 
     if name == "chat_folder_move":
         args = validate_tool_args(args, CHAT_FOLDER_MOVE_SCHEMA)
-        caller_key, gate = _refuse_tree_shaping_if_unverifiable("moving a folder")
+        caller_key, caller_app, gate = _refuse_tree_shaping_if_unverifiable("moving a folder")
         if gate:
             return gate
+        before_ref = str(args.get("before") or "").strip()
+        after_ref = str(args.get("after") or "").strip()
+        if before_ref and after_ref:
+            return "Error: pass `before` or `after`, not both — one anchor names one position."
         chat_folders, folders_err = _get_rows("/api/chat/folders")
         if folders_err:
             return f"Error: {folders_err}"
@@ -1221,21 +1402,157 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             return f"Error: {fld_err}"
         if not fld_id:
             return "Error: 'root' is not a folder — name the folder to move."
-        dest_id, dest_err = _resolve_chat_folder_id(args.get("new_parent") or "", chat_folders)
-        if dest_err:
-            return f"Error: {dest_err}"
-        d = _patch(
-            f"/api/chat/folders/{fld_id}",
-            {"parent_id": dest_id},
-            session_key=caller_key,
+        anchor_ref = before_ref or after_ref
+        anchor_id = ""
+        if anchor_ref:
+            anchor_id, anchor_err = _resolve_chat_folder_id(anchor_ref, chat_folders)
+            if anchor_err:
+                return f"Error: {anchor_err}"
+            if not anchor_id:
+                return (
+                    "Error: 'root' is not a folder — `before`/`after` names a "
+                    "SIBLING folder to sit next to."
+                )
+            if anchor_id == fld_id:
+                return "Error: a folder cannot be positioned relative to itself."
+        anchor_row = next((f for f in chat_folders if str(f.get("id")) == anchor_id), {})
+        anchor_parent = str(anchor_row.get("parent_id") or "")
+        current_parent = str(
+            next((f for f in chat_folders if str(f.get("id")) == fld_id), {}).get("parent_id") or ""
         )
-        if d.get("error"):
-            # The endpoint owns the cycle guard (a folder cannot move into its
-            # own descendant) — surface its verdict rather than re-deriving it.
-            return f"Error: {d['error']}"
+        if anchor_id and "new_parent" not in args:
+            # An anchor already fixes the sibling set, so "put X after Y" needs no
+            # second reference to the parent Y names — and demanding one would make
+            # repositioning INSIDE a folder impossible to express, since an omitted
+            # ``new_parent`` means the top level.
+            dest_id = anchor_parent
+        else:
+            dest_id, dest_err = _resolve_chat_folder_id(args.get("new_parent") or "", chat_folders)
+            if dest_err:
+                return f"Error: {dest_err}"
+            if anchor_id and anchor_parent != dest_id:
+                return (
+                    "Error: the anchor is not in the destination — `before`/`after` "
+                    "names a SIBLING, so it must already sit directly under "
+                    "`new_parent`. Omit `new_parent` to let the anchor choose the "
+                    "parent."
+                )
+
+        # Placing a folder is ONE write whenever the store already has a free
+        # integer slot at that position — before the first sibling, after the last,
+        # or in a gap. Only when the two neighbours are adjacent integers, which is
+        # what a sidebar drag leaves behind, do the siblings have to be renumbered;
+        # that renumber is contiguous 0..n-1, the same shape a drag writes, so the
+        # two paths leave one convention rather than two.
+        #
+        # The distinction is worth the branch because several writes cannot be made
+        # atomic from here: the endpoint takes one row at a time. The one-write case
+        # therefore cannot land half-applied at all, and the renumber is reserved
+        # for the positions that genuinely need it.
+        order_writes: list[tuple[str, int]] = []
+        if anchor_id:
+            siblings = [
+                f
+                for f in _chat_folder_siblings(chat_folders, dest_id)
+                if str(f.get("id")) != fld_id
+            ]
+            slot = next((i for i, f in enumerate(siblings) if str(f.get("id")) == anchor_id), -1)
+            if slot < 0:
+                return "Error: the anchor folder is no longer where it was — re-read the tree."
+            moving = next(f for f in chat_folders if str(f.get("id")) == fld_id)
+            index = slot if before_ref else slot + 1
+            free = _free_slot_order(siblings, index)
+            if free is not None:
+                # Skip a write that would store the value the row already carries.
+                order_writes = [] if _chat_folder_order(moving) == free else [(fld_id, free)]
+            else:
+                placed = siblings[:index] + [moving] + siblings[index:]
+                order_writes = [
+                    (str(f.get("id")), i)
+                    for i, f in enumerate(placed)
+                    if _chat_folder_order(f) != i
+                ]
+            if caller_app and order_writes:
+                # The endpoint judges each PATCH on its own, so the whole set is
+                # checked HERE, before the first write: a refusal that lands after
+                # the move would leave the person's sidebar in an order nobody
+                # chose, and there is nothing to roll it back with.
+                #
+                # Gated on a NON-EMPTY set, never on a multi-row one. A renumber
+                # can change exactly one row and that row need not be the moved
+                # folder — placing X where only its far neighbour shifts writes a
+                # single FOREIGN row — so a count-based gate would let exactly the
+                # case this check exists for through.
+                by_id = {str(f.get("id")): f for f in chat_folders}
+                foreign = [
+                    fid
+                    for fid, _pos in order_writes
+                    if fid != fld_id
+                    and str(by_id.get(fid, {}).get("owner_app") or "") != caller_app
+                ]
+                if foreign:
+                    return (
+                        f"Error: positioning this folder would renumber {len(foreign)} "
+                        "sibling folder(s) this app does not own, so the move is "
+                        "refused rather than half-applied. Move it without "
+                        "`before`/`after`, or ask the person to set the order."
+                    )
+
+        # The moved folder's own position rides along with the reparent: one write
+        # for the row this call is about, so the common case stays a single request.
+        #
+        # ``parent_id`` is omitted when the parent is NOT changing. The endpoint
+        # treats its presence as a reparent and applies the reparent-only rule that
+        # a subtree holding a folder the caller does not own cannot be moved — so
+        # sending the current parent back would make an app's pure reposition fail
+        # on a guard about a move that is not happening.
+        move_body: dict[str, Any] = {}
+        if current_parent != dest_id:
+            move_body["parent_id"] = dest_id
+        own_pos = next((pos for fid, pos in order_writes if fid == fld_id), None)
+        if own_pos is not None:
+            move_body["order"] = own_pos
+        if move_body:
+            d = _patch(f"/api/chat/folders/{fld_id}", move_body, session_key=caller_key)
+            if d.get("error"):
+                # The endpoint owns the cycle guard (a folder cannot move into its
+                # own descendant) — surface its verdict rather than re-deriving it.
+                return f"Error: {d['error']}"
+        else:
+            # Nothing to write for this row: it is already in the destination and
+            # already holds the position asked for.
+            d = next((f for f in chat_folders if str(f.get("id")) == fld_id), {})
         moved: list[dict] = [f for f in chat_folders if str(f.get("id")) != fld_id]
         moved.append({**d, "id": fld_id})
         dest_path = _chat_folder_paths(moved).get(fld_id) or "(top level)"
+        for sib_id, pos in order_writes:
+            if sib_id == fld_id:
+                continue
+            shifted = _patch(f"/api/chat/folders/{sib_id}", {"order": pos}, session_key=caller_key)
+            if shifted.get("error"):
+                # The move itself landed and is not in doubt; only the sequence of
+                # the remaining siblings is. Say which half held so the caller can
+                # finish it instead of re-moving a folder that already arrived.
+                return redact(
+                    f"Moved folder (id={fld_id}) to `{dest_path}`, but ordering "
+                    f"stopped partway: {shifted['error']}. Re-run the same call to "
+                    "finish positioning it."
+                )
+        if anchor_id:
+            side = "before" if before_ref else "after"
+            anchor_path = _chat_folder_paths(chat_folders).get(anchor_id) or anchor_id
+            if current_parent == dest_id:
+                # Nothing moved, so saying "moved to <the folder's own path>" would
+                # describe a reparent that did not happen. Name what changed.
+                parent_label = _chat_folder_paths(chat_folders).get(dest_id) or "(top level)"
+                return redact(
+                    f"Repositioned folder (id={fld_id}) {side} `{anchor_path}` "
+                    f"in `{parent_label}`."
+                )
+            return redact(
+                f"Moved folder (id={fld_id}) to `{dest_path}`, positioned {side} "
+                f"`{anchor_path}`."
+            )
         return redact(f"Moved folder (id={fld_id}) to `{dest_path}`.")
 
     if name == "chat_folder_move_session":

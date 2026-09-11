@@ -92,6 +92,64 @@ def _by_id(state: DashboardState, fid: str) -> dict[str, Any] | None:
     return next((f for f in state._folders if f["id"] == fid), None)
 
 
+class TestOrderIsStoredVerbatim:
+    """The endpoint stores whatever int the body carries, sign included.
+
+    ``chat_folder_move``'s free-slot placement puts a folder ahead of the first
+    sibling by writing ``first.order - 1``, which is NEGATIVE once the sidebar has
+    renumbered a set from 0 — the ordinary case. Nothing in the tool layer can make
+    that work if the endpoint clamps or rejects it, and the tool writes it as the
+    single request that keeps a reposition from landing half-applied.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_negative_order_is_accepted(self) -> None:
+        state = _state(_ChatSlot("chat-1-100"))
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.patch(
+                f"/api/chat/folders/{PERSON}",
+                json={"order": -1},
+                headers={"X-Session-Key": "dashboard:chat-1-100"},
+            )
+        assert resp.status == 200
+        assert _by_id(state, PERSON)["order"] == -1
+
+    @pytest.mark.asyncio
+    async def test_a_gap_midpoint_is_accepted(self) -> None:
+        state = _state(_ChatSlot("chat-1-100"))
+        async with TestClient(TestServer(_make_app(state))) as client:
+            resp = await client.patch(
+                f"/api/chat/folders/{PERSON}",
+                json={"order": 5},
+                headers={"X-Session-Key": "dashboard:chat-1-100"},
+            )
+        assert resp.status == 200
+        assert _by_id(state, PERSON)["order"] == 5
+
+    @pytest.mark.asyncio
+    async def test_a_duplicate_order_is_not_refused(self) -> None:
+        """Two siblings may share a number; the name tie-break resolves them.
+
+        The free-slot check treats equal neighbours as no room precisely because
+        the store allows this, so the allowance has to be pinned.
+        """
+        state = _state(_ChatSlot("chat-1-100"))
+        async with TestClient(TestServer(_make_app(state))) as client:
+            first = await client.patch(
+                f"/api/chat/folders/{PERSON}",
+                json={"order": 7},
+                headers={"X-Session-Key": "dashboard:chat-1-100"},
+            )
+            second = await client.patch(
+                f"/api/chat/folders/{RADAR}",
+                json={"order": 7},
+                headers={"X-Session-Key": "dashboard:chat-1-100"},
+            )
+        assert (first.status, second.status) == (200, 200)
+        assert _by_id(state, PERSON)["order"] == 7
+        assert _by_id(state, RADAR)["order"] == 7
+
+
 class TestCreateStampsTheOwner:
     @pytest.mark.asyncio
     async def test_an_apps_folder_is_stamped_with_that_app(self) -> None:

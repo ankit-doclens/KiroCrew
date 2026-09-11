@@ -996,6 +996,53 @@ the tool layer could only drift or race. What the tool layer still decides is th
 one question the endpoint cannot: whether the caller can be placed at all, since
 an unverifiable or delegated caller has no scope to bound a write to.
 
+**Position is the one folder write the tool layer has to compose.** A folder's
+place among its siblings is an `order` int the endpoint stores verbatim and never
+renumbers, so there is no single value a caller could compute — which is why
+`chat_folder_move` takes `before`/`after` naming a SIBLING rather than a number.
+Most placements are still ONE write: when the store already has a free integer
+slot at that position — ahead of the first sibling, past the last, or in a gap a
+delete left behind — only the moved row is written, so the reposition cannot land
+half-applied. Only two neighbours holding adjacent integers, which is what a
+sidebar drag leaves behind, force the siblings to be renumbered; that renumber is
+contiguous from 0, the same values `computeReorderedFolders` writes, so the two
+paths leave one convention in the store instead of two.
+
+An anchor may stand in for `new_parent` because an omitted `new_parent` means the
+top level: without that, ordering a folder inside a folder would be
+inexpressible, since every call would drag it out to the root as the price of
+positioning it.
+
+Composing writes is where an app's confinement needs a rule the endpoint cannot
+state. The endpoint judges each PATCH on its own, so an app whose placement needs
+a renumber would have its first write accepted and a later one refused, leaving
+the person's sidebar in an order nobody chose and nothing to roll it back with.
+So the tool layer checks the WHOLE renumber against the caller's ownership before
+the first write and refuses the call intact — the only folder rule this layer
+decides, and it decides it because atomicity across several endpoint calls is a
+property only the caller can hold. A one-write placement is not gated: it touches
+the app's own row only, and the endpoint judges that write as it judges any other.
+
+The renumber path keeps one accepted residue. Several single-row writes cannot be
+made atomic from here, so a transport failure partway through leaves the
+destination's siblings carrying a mix of old and new numbers until the call is
+re-run — a display sequence, reported to the caller, over a field whose duplicates
+and gaps are already legal and already tie-broken by name. The sidebar's own drag
+has the same shape today, firing one `updateChatFolder` per changed folder with no
+transaction. Closing it for both paths needs a bulk order write that applies under
+the folder-store lock, which is a change to the store's API rather than to this
+layer.
+
+`chat_folder_tree` lists folders in that same stored order rather than by path,
+because it is what an anchor is picked from — an alphabetical listing would show a
+sequence the person never sees and make every `before`/`after` a guess. The
+comparator is `order` then name, and both sides read a missing `order` as 0:
+`folderTree.bySidebarOrder` for every surface that draws siblings, and
+`_chat_folder_order` for the tool. A folder written before the field existed
+carries no `order` at all, so a comparator without that coercion would compare
+`NaN`, fall through to its tie-break, and show the agent a different sequence than
+the person sees.
+
 Moving the decision to the endpoint makes the write's IDENTITY load-bearing, so
 the gate returns the key it verified and every folder write sends that key
 unchanged. The write helpers default to `_resolve_session_key`, whose `/proc`

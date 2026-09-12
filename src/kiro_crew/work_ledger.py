@@ -59,6 +59,7 @@ import json
 import logging
 import re
 import secrets
+import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -1852,3 +1853,73 @@ def apply_acceptance_update(
             slot_key, item, "decision", "acceptance promoted by the conductor"
         )
         return {"item": item, "event": event}
+
+
+# --------------------------------------------------------------------------- #
+# Maintenance
+# --------------------------------------------------------------------------- #
+
+
+def purge_conductor(slot_key: str) -> bool:
+    """Delete one conductor's whole ledger directory. Returns whether it went.
+
+    An EXPLICIT maintenance primitive, like ``session_ledger.purge``: nothing in
+    the request path calls it. The caller owns the eligibility decision — that
+    every item is closed and nothing is still writing — because this store cannot
+    see the sessions that would resume the work, and a conductor whose items are
+    still open loses its own record here irreversibly.
+
+    Serialised against a live write by taking :func:`conductor_lock`, FIRST in the
+    lock order, so nothing this removes can be half-written by ``goal`` or by a
+    ``create`` holding that same lock. An item write takes only its own item lock,
+    so a write to an item this call is removing is not excluded — which is why the
+    caller must first establish that every item is terminal, the one state from
+    which the store accepts no further item write.
+
+    The lock file is deleted LAST, after the hold is released. It is the inode the
+    lock is held on, and Windows refuses to unlink a file an open handle still
+    holds, so removing it from inside the critical section would leave the
+    directory behind on exactly the platform the lock exists to cover. Removal is
+    best-effort past that point: a concurrent holder of an item lock (POSIX
+    permits the unlink, Windows does not) leaves a residue rather than raising,
+    and the return value reports what actually happened.
+
+    RESIDUAL, stated rather than implied. Removing the lock file removes the
+    inode the lock is taken on, so a writer that was blocked on the OLD inode
+    can proceed while a later writer creates a NEW one, and the two are then not
+    serialised against each other. That is not fixable by ordering: unlinking
+    inside the hold has the same effect, and any path-based advisory lock has it
+    the moment its store is deleted — ``session_ledger.purge`` removes the same
+    kind of lock file with no lock held at all. What bounds it is WHAT is left to
+    interleave over: this call removes ``conductor.json`` first, so a writer
+    arriving afterwards mints a fresh header rather than editing the purged one,
+    and the worst outcome is two fresh headers racing on a ledger the operator
+    just deleted — not a lost record. The caller narrows the precondition further
+    by re-deriving eligibility immediately before the delete
+    (``ledger_sweep.purge``), so a ledger with any live writer normally never
+    reaches this function.
+    """
+    directory = conductor_dir(slot_key)
+    if not directory.is_dir():
+        return False
+    with conductor_lock(slot_key):
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if child.name == _LOCK_FILE:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except OSError:
+                    logger.debug("work ledger purge: could not remove %s", child.name)
+    try:
+        (directory / _LOCK_FILE).unlink(missing_ok=True)
+        directory.rmdir()
+    except OSError:
+        logger.debug("work ledger purge: ledger directory not fully removed")
+    return not directory.exists()

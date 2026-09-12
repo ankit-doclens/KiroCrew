@@ -12,6 +12,7 @@ stood alone, so that phase reverted by deleting two files).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
@@ -1847,6 +1848,14 @@ _PERMITTED_STORE_IMPORTERS = frozenset(
         # The four tools' HTTP routes, and the ONLY module that touches the store
         # directly: identity comes from X-Session-Key, never from the body.
         "dashboard/handlers/work_ledger.py",
+        # The operator-run cleanup sweep behind ``kirocrew doctor --ledger-sweep``.
+        # It is a second seam deliberately, and it does not weaken the rule the
+        # allowlist exists for: it resolves NO caller identity — there is no
+        # request and no session to attribute — and it reads the store by
+        # enumerating its directories rather than by folding a key someone
+        # supplied. It is also not model-reachable: no MCP tool routes to it,
+        # because the deletion it performs is irreversible.
+        "ledger_sweep.py",
     }
 )
 
@@ -1903,3 +1912,50 @@ def test_only_the_phase_2_seams_import_the_module():
         f"allowlisted module(s) no longer import the store: {sorted(stale)}. Either a "
         "seam moved (fix the entry) or it is gone (delete it)."
     )
+
+
+# ── maintenance ───────────────────────────────────────────────────────────
+
+
+def test_purge_conductor_removes_the_ledger_under_the_conductor_lock():
+    """The removal happens INSIDE the conductor lock, so nothing it deletes can be
+    half-written by a ``goal`` or ``create`` holding that same lock.
+
+    Asserted by counting what was gone while the lock was held rather than by the
+    exit code: a purge that ran entirely outside the lock would remove the same
+    directory and return the same value.
+    """
+    item_id = _new_item()
+    wl.apply_conductor_action(CONDUCTOR, "close", item_id=item_id, state="accepted")
+    directory = wl.conductor_dir(CONDUCTOR)
+    assert (directory / "items" / f"{item_id}.json").exists()
+
+    real_lock = wl.conductor_lock
+    inside: list[bool] = []
+
+    @contextlib.contextmanager
+    def _watched(slot_key: str):
+        with real_lock(slot_key):
+            yield
+            # Recorded on the way OUT, still under the hold: the item file must
+            # already be gone by the time the lock is released.
+            inside.append(not (directory / "items").exists())
+
+    with mock.patch.object(wl, "conductor_lock", _watched):
+        assert wl.purge_conductor(CONDUCTOR) is True
+
+    assert inside == [True], "the ledger was removed outside the conductor lock"
+    assert not directory.exists()
+    assert wl.read_conductor(CONDUCTOR) is None
+
+
+def test_purge_conductor_is_a_no_op_for_a_ledger_that_does_not_exist():
+    assert wl.purge_conductor("chat-never-conducted") is False
+
+
+def test_purge_conductor_refuses_a_key_that_could_escape_the_root():
+    """The same shape gate every path constructor passes through — a delete must
+    not be the one call that takes an unchecked key."""
+    with pytest.raises(wl.WorkLedgerError) as info:
+        wl.purge_conductor("../../etc")
+    assert info.value.code == wl.CODE_INVALID_VALUE

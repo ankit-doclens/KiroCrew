@@ -111,12 +111,12 @@ than by prose; see `docs/system-specs/modules/agent-host-contract.md`.
 
 ## Provenance of what is committed today
 
-Every fixture here is `synthesized` except the four under `opencode/`, which
-are captures. Stated plainly because it bounds what the corpus proves: a
-synthesized fixture locks the dispatch layer's behaviour against refactoring,
-which is what it was built for, and it does **not** prove that the backend really
-emits those shapes. Only the live files carry that second proof, and for opencode
-they reach all seven required classes.
+Every fixture here is `synthesized` except the four under `opencode/` and the
+three under `pi/`, which are captures. Stated plainly because it bounds what the
+corpus proves: a synthesized fixture locks the dispatch layer's behaviour against
+refactoring, which is what it was built for, and it does **not** prove that the
+backend really emits those shapes. Only the live files carry that second proof, and
+for opencode and pi they reach all seven required classes.
 
 | Directory | Backend id | Provenance | Why |
 |---|---|---|---|
@@ -125,6 +125,7 @@ they reach all seven required classes.
 | `claude/` | `claude` | synthesized | `claude-agent-acp` was not installed on the recording host. |
 | `codex/` | `codex` | synthesized | `codex-acp` was not installed on the recording host. |
 | `opencode/` | `opencode` | **live** | Four captures off `opencode acp` 1.18.30 driving a local Ollama model, all seven required classes reached live, plus a `session/load` result (`session-load-live.jsonl`: replayed conversation, `configOptions`, no `modes`). `session-live.jsonl`: the initialize response, the `session/new` response, an `agent_message_chunk` turn, a `usage_update` and the `stopReason` response, verbatim and in order. `tool-call-live.jsonl`: a `tool_call` and two `tool_call_update` frames from a call the harness rejected against its own argument schema. `permission-request-live.jsonl`: `tool_call`, the `session/request_permission` frame OpenCode sent with `permission: ask` in force, and the `tool_call_update` frames through `completed` with the command's real output. Slices of longer turns, with the home directory redacted to `~`. |
+| `pi/` | `pi` | **live** | Three captures off `pi-acp` 0.0.33 spawning `pi` 0.85.1 driving a local Ollama model, all seven required classes reached live. `session-live.jsonl`: initialize, `session/new` (a `model` select of `provider/model` ids, a `thought_level` select, `modes`), `available_commands_update`, a `tool_call` + two `tool_call_update` frames for a read pi rejected against its own schema, the chunk and the `stopReason` result. `permission-request-live.jsonl`: the `session/request_permission` pi-acp forwards from Kiro Crew's gate extension (pi has no gate of its own; the frame's `toolCall` describes the confirm DIALOG and the real call rides in its message as a JSON envelope), then the updates through `completed`. `session-load-live.jsonl`: a `session/load` from a second process, replayed conversation, and a result that carries `modes`. |
 
 Replacing any row with a live capture is a strict improvement and needs no
 change to the test. Record it, set `recorded` to `live`, fill in the real

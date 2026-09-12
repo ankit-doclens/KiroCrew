@@ -447,11 +447,15 @@ def test_child_environment_is_scrubbed_of_crew_variables(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "real-windows-home"))
     monkeypatch.setenv("KIROCREW_SANDBOX_ACTIVE", "1")
     monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "real-home"))
-    for name in deny_diff._INHERITED_HOME_OVERRIDE_ENV_VARS:
+    checkout = tmp_path / "checkout"
+    _copy_host_auth_declarations(checkout)
+    scrubbed = deny_diff._inherited_home_override_env_vars(checkout)
+    assert "KIRO_HOME" in scrubbed and len(scrubbed) > 1
+    for name in scrubbed:
         monkeypatch.setenv(name, str(tmp_path / name.lower()))
 
     throwaway = tmp_path / "throwaway-home"
-    env = deny_diff._child_env(tmp_path / "checkout", throwaway)
+    env = deny_diff._child_env(checkout, throwaway)
 
     assert "KIROCREW_SANDBOX_ACTIVE" not in env
     assert env["HOME"] == str(throwaway)
@@ -459,14 +463,60 @@ def test_child_environment_is_scrubbed_of_crew_variables(tmp_path, monkeypatch):
     assert env["KIROCREW_HOME"] == str(throwaway)
     assert env["PYTHONPATH"] == str(tmp_path / "checkout" / "src")
     assert throwaway.is_dir()
-    assert not set(deny_diff._INHERITED_HOME_OVERRIDE_ENV_VARS) & env.keys()
+    assert not set(scrubbed) & env.keys()
 
 
-def test_child_environment_scrubs_every_declared_home_override():
-    assert set(deny_diff._INHERITED_HOME_OVERRIDE_ENV_VARS) == {
+def _copy_host_auth_declarations(checkout):
+    """Stage the live declarations module where the script reads it in a checkout."""
+    src = ROOT / deny_diff._HOST_AUTH_DECLARATIONS
+    dst = checkout / deny_diff._HOST_AUTH_DECLARATIONS
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def test_child_environment_scrubs_every_declared_home_override(tmp_path):
+    """The parsed set is the declared set: a harness added to host_auth is scrubbed.
+
+    Parsed from the checkout's own copy of the declarations module rather than
+    spelled in the script, so this pin is what fails if the parser stops seeing a
+    declaration -- not a hand-kept list that a new harness has to remember to edit.
+    """
+    checkout = tmp_path / "checkout"
+    _copy_host_auth_declarations(checkout)
+    assert set(deny_diff._inherited_home_override_env_vars(checkout)) == {
         "KIRO_HOME",
         *home_override_env_vars(),
     }
+
+
+def test_a_checkout_without_the_declarations_borrows_this_checkouts(tmp_path):
+    """Fail-safe direction: no file, no crash, and the scrub never NARROWS.
+
+    A base older than the declarations module still had classifiers reading those
+    credential-home variables, so scrubbing the host variable alone on that side
+    would let the caller's ``CODEX_HOME`` (say) reach one side of the differential
+    and not the other. The running checkout's declarations stand in.
+    """
+    assert set(deny_diff._inherited_home_override_env_vars(tmp_path / "empty")) == {
+        "KIRO_HOME",
+        *home_override_env_vars(),
+    }
+    assert len(home_override_env_vars()) > 1
+
+
+def test_both_sides_scrub_the_union_of_their_declarations(tmp_path):
+    """A base declaring FEWER harnesses is still scrubbed with everything the head knows.
+
+    Otherwise the two classification children would run under different
+    environments and the differential would inherit the runner's.
+    """
+    checkout = tmp_path / "older"
+    dst = checkout / deny_diff._HOST_AUTH_DECLARATIONS
+    dst.parent.mkdir(parents=True)
+    dst.write_text("X = dict(home_override_env_vars=('ONLY_THE_OLD_ONE',))\n", encoding="utf-8")
+    scrubbed = set(deny_diff._inherited_home_override_env_vars(checkout))
+    assert "ONLY_THE_OLD_ONE" in scrubbed
+    assert set(home_override_env_vars()) <= scrubbed
 
 
 def test_worker_refuses_a_tree_it_was_not_pointed_at(tmp_path):

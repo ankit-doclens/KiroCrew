@@ -142,17 +142,67 @@ _WORKER_TIMEOUT = 600
 _REASON_CHARS = 300
 
 # Home-root overrides that do not carry the KIROCREW_ prefix scrubbed below.
-# This parent script cannot import the product it is comparing; the source test
-# pins the harness entries against agent_sdk.host_auth's declarations instead.
-_INHERITED_HOME_OVERRIDE_ENV_VARS = (
-    "KIRO_HOME",
-    "CODEX_HOME",
-    "CLAUDE_CONFIG_DIR",
-    "CLAUDE_HOME",
-    # OpenCode's credential home follows the XDG data directory; a relocated token
-    # must not reach the classification child any more than a default one does.
-    "XDG_DATA_HOME",
-)
+#
+# The host's own variable is spelled here. Every HARNESS variable is read out of
+# the checkout's ``agent_sdk/host_auth.py`` at run time instead (see
+# ``_declared_home_override_env_vars``): this parent script cannot import the
+# product it is comparing, but it can parse the one file that declares each
+# harness's credential home, and a harness added there is then scrubbed here with
+# no second edit. The source test pins the parsed set against the declarations.
+_HOST_HOME_OVERRIDE_ENV_VARS = ("KIRO_HOME",)
+_HOST_AUTH_DECLARATIONS = Path("src") / "kiro_crew" / "agent_sdk" / "host_auth.py"
+#: The tree this script runs from -- the fallback source of declarations for a
+#: checkout that has none readable (see ``_inherited_home_override_env_vars``).
+_OWN_CHECKOUT = Path(__file__).resolve().parents[1]
+
+
+def _declared_home_override_env_vars(checkout: Path) -> tuple[str, ...]:
+    """Every ``home_override_env_vars`` a harness declares in *checkout*, parsed.
+
+    Reads the declarations module as text and walks its AST for the keyword
+    argument, so no product code runs: string literals inside every
+    ``home_override_env_vars=(...)`` tuple, in file order, de-duplicated. A missing
+    or unparseable file yields an empty tuple; :func:`_inherited_home_override_env_vars`
+    decides what that means.
+    """
+    import ast
+
+    path = checkout / _HOST_AUTH_DECLARATIONS
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return ()
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.keyword) or node.arg != "home_override_env_vars":
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            continue
+        for element in node.value.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                if element.value not in found:
+                    found.append(element.value)
+    return tuple(found)
+
+
+def _inherited_home_override_env_vars(checkout: Path) -> tuple[str, ...]:
+    """The host variable plus every harness variable *checkout* declares.
+
+    The UNION of *checkout*'s declarations and THIS checkout's. Both sides of the
+    differential must scrub the same set, or a credential-home variable in the
+    runner's environment reaches one classification child and not the other and
+    the comparison inherits the runner. A base ref older than the module, or one
+    declaring fewer harnesses, is therefore scrubbed with everything the head
+    declares too; and the set is still derived from a declarations module, not
+    spelled here.
+    """
+    declared = list(_declared_home_override_env_vars(checkout))
+    for name in _declared_home_override_env_vars(_OWN_CHECKOUT):
+        if name not in declared:
+            declared.append(name)
+    return _HOST_HOME_OVERRIDE_ENV_VARS + tuple(
+        name for name in declared if name not in _HOST_HOME_OVERRIDE_ENV_VARS
+    )
 
 
 class DenyDiffError(Exception):
@@ -379,10 +429,9 @@ def _child_env(checkout: Path, home: Path) -> dict[str, str]:
     land in a throwaway directory rather than the operator's real security log.
     """
     home.mkdir(parents=True, exist_ok=True)
+    scrubbed = _inherited_home_override_env_vars(checkout)
     env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith("KIROCREW_") and k not in _INHERITED_HOME_OVERRIDE_ENV_VARS
+        k: v for k, v in os.environ.items() if not k.startswith("KIROCREW_") and k not in scrubbed
     }
     # pathlib reads HOME on POSIX and USERPROFILE on Windows. Set both so a child
     # materialized for either platform stays hermetic even when this helper is

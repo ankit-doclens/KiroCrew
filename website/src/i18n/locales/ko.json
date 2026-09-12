@@ -14655,6 +14655,7 @@
   },
   "store": {
     "chatSlice": {
+      "session_gone": "그 세션은 더 이상 존재하지 않습니다.",
       "truncated": "…(생략됨)"
     }
   },

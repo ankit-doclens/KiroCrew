@@ -6330,6 +6330,7 @@
   },
   "store": {
     "chatSlice": {
+      "session_gone": "That session no longer exists.",
       "truncated": "…(truncated)"
     }
   },

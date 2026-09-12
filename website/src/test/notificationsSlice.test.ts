@@ -37,6 +37,36 @@ describe('notificationsSlice', () => {
       expect(state.items[1].ts).toBe('2')
     })
 
+    it('a redelivered notification (same ts, same content) is deduped', () => {
+      // An SSE replay after reconnect and a re-synced approval both re-dispatch
+      // the same row; one copy is what the feed must show.
+      const state = reducer({ items: [n1] }, addNotification({ ...n1 }))
+      expect(state.items).toHaveLength(1)
+    })
+
+    it('two distinct notifications colliding on ts both land, the second nudged', () => {
+      // Client-side callers mint `String(Date.now())`: two in one millisecond
+      // used to silently lose the second. The chokepoint disambiguates in
+      // FRACTIONAL digits, the only shape `parseTs` still reads as a time.
+      const a: Notification = { kind: 'agent', title: 'first', body: '', ts: '1700000000000' }
+      const b: Notification = { kind: 'agent', title: 'second', body: '', ts: '1700000000000' }
+      let state = reducer({ items: [] }, addNotification(a))
+      state = reducer(state, addNotification(b))
+      expect(state.items).toHaveLength(2)
+      expect(state.items[0].ts).toBe('1700000000000')
+      expect(state.items[1].ts).toBe('1700000000000.1')
+      expect(state.items[1].title).toBe('second')
+    })
+
+    it('the nudge steps past an already-occupied fractional slot', () => {
+      const mk = (title: string, ts: string): Notification => ({ kind: 'agent', title, body: '', ts })
+      let state = reducer({ items: [mk('a', '5'), mk('b', '5.1')] }, addNotification(mk('c', '5')))
+      expect(state.items.map(i => i.ts)).toEqual(['5', '5.1', '5.2'])
+      // A ts that already carries fractional digits nudges by appending.
+      state = reducer(state, addNotification(mk('d', '5.1')))
+      expect(state.items[3].ts).toBe('5.11')
+    })
+
     it('ackNotificationByTs marks as acked', () => {
       const state = reducer({ items: [n1, n2] }, ackNotificationByTs('1'))
       expect(state.items[0].acked).toBe(true)

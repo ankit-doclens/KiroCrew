@@ -5,6 +5,7 @@ import { api } from '../api/client'
 import { resolveDefaultMemoryMode } from '../api/queryClient'
 import { devLog, inspectorOn } from '../dev/scrollInspector'
 import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey, sseSlots, sseConnected } from './dashboardSlice'
+import { addNotification } from './notificationsSlice'
 import { resolveDefaultColor } from '../utils/sessionColors'
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { isSystemNoticeKind } from '../lib/systemNotice'
@@ -1985,14 +1986,32 @@ function seedContextUsage(
 }
 
 /** `switchSlot`'s argument. The plain-string spelling is the overwhelmingly
- *  common one; the object form exists for the ONE caller class that must NOT
- *  have a 404 unwound: a switch into a slot the caller just created (e.g. the
- *  error handoff), where a 404 is a create/fetch race on a slot that exists
- *  and the seeded composer must stay visible. Handling it as a per-call option
- *  keeps the decision inside the reducer's atomic unwind instead of a caller
- *  patching half the state back afterwards -- the exact #6260 failure class
- *  this fix removes. */
-export type SwitchSlotArg = string | { key: string; keepTargetOnMissing?: boolean }
+ *  common one; the object form exists for caller classes that must opt out of a
+ *  default or opt into a surface:
+ *
+ *  - `keepTargetOnMissing`: the ONE caller class that must NOT have a 404
+ *    unwound — a switch into a slot the caller just created (e.g. the error
+ *    handoff), where a 404 is a create/fetch race on a slot that exists and
+ *    the seeded composer must stay visible. Handling it as a per-call option
+ *    keeps the decision inside the reducer's atomic unwind instead of a caller
+ *    patching half the state back afterwards -- the exact #6260 failure class
+ *    this fix removes.
+ *  - `announceOnMissing`: a USER-FACING gesture on a reference to a listed
+ *    session — the sidebar rows, the command palette recents, the command
+ *    bar's session picker, the notification panel's go-to-chat buttons, the
+ *    keyboard session jump, the worlds scene. On a 404 the thunk then says
+ *    why the gesture did nothing and evicts the gone entry synchronously via
+ *    `removeSlotOptimistic` (#6372) — but only when the selection escapes the
+ *    gone key (the rejected reducer restores a differing `slotSwitchOrigin`);
+ *    evicting the session the user was already in would leave `activeSlot`
+ *    naming a row the sidebar no longer lists. It is opt-IN because the remaining
+ *    caller classes self-handle their 404 — the side-chat re-bind and
+ *    worktree-open paths render their own in-page error, creation and
+ *    recovery paths (auto-improvement, issue-radar, cold-boot restore, the
+ *    Slack-token reconnect) silently fall back to a fresh session — so
+ *    announcing there would double-report or contradict a successful
+ *    recovery. */
+export type SwitchSlotArg = string | { key: string; keepTargetOnMissing?: boolean; announceOnMissing?: boolean }
 
 /** The slot key of a `switchSlot` argument, in either spelling. Non-object
  *  values pass through untouched: a hand-rolled test dispatch can omit
@@ -2097,7 +2116,61 @@ export const switchSlot = createAsyncThunk<
       // against a class the mock does not export throws inside this very
       // handler (see utils/agentSwitchFeedback.ts for the precedent).
       const status = (e as { status?: unknown } | null)?.status
-      if (typeof status === 'number') return rejectWithValue({ status, message: errMessage(e) })
+      if (typeof status === 'number') {
+        const payload: StatusRejection = { status, message: errMessage(e) }
+        // A 404 means the target is GONE — classified on the STRUCTURED payload
+        // with the same `isMissingSlotError` the rejected reducer applies, so
+        // the two ends of this thunk cannot disagree about what a 404 is. The
+        // reducer restores the pre-switch selection but cannot dispatch, which
+        // made the recovery SILENT: nothing told the user why the click did
+        // nothing, and the dead entry stayed listed until the next
+        // authoritative refresh, inviting the same wordless bounce again
+        // (#6372). For an `announceOnMissing` caller — a user-facing gesture on
+        // a listed session, see SwitchSlotArg for why it is opt-in — surface
+        // both halves here, BEFORE rejecting so the payload reaches
+        // `.unwrap()` consumers and the reducer unchanged. The notification's
+        // TITLE is the constant fact (the feed renders titles single-line
+        // truncated, so the fact must not ride behind a long name); the
+        // session's name goes in the body, where the feed gives it its own
+        // line. The eviction is `removeSlotOptimistic`: the 404 is exactly the
+        // server-confirmed deletion that reducer asks its callers for, it
+        // drops the row and its unread state synchronously with no network
+        // round-trip, and the next authoritative slots write reconciles either
+        // way.
+        const announce = typeof arg === 'object' && arg !== null && arg.announceOnMissing === true
+        if (announce && isMissingSlotError(payload)) {
+          // Read BEFORE the eviction below removes the row. Optional-chained
+          // like the other dashboard reads in this thunk: a partial preloaded
+          // test state can omit the slice.
+          const name = (getState() as RootState).dashboard?.slots?.find(s => s.key === key)?.title
+          dispatch(addNotification({
+            ts: String(Date.now()),
+            kind: 'agent',
+            title: i18nT('store.chatSlice.session_gone'),
+            body: name ?? '',
+          }))
+          // Evict only when the selection will ESCAPE the evicted key. The
+          // rejected reducer restores `slotSwitchOrigin` only when it differs
+          // from the target (chat's `deleteSlot` states the invariant: the
+          // active slot must already name a surviving peer by the time a slot
+          // leaves the list). When the gone session IS the origin — the user
+          // re-activated the session they were already in — no restore runs,
+          // so evicting here would leave `activeSlot` naming a key no sidebar
+          // row lists: the pane stays open, the header chips render blank
+          // (`currentSlot` is undefined), and nothing heals it because an
+          // authoritative write will not re-add a deleted slot. Keeping the
+          // row for that one case is the pre-change behaviour, the notice
+          // still explains the failure, and the next authoritative slots
+          // frame retires the row once the user navigates away.
+          // `keepTargetOnMissing` keeps the selection ON the target by the
+          // reducer's own contract, so the selection never escapes there.
+          const keepTarget = typeof arg === 'object' && arg !== null && arg.keepTargetOnMissing === true
+          const chat = (getState() as RootState).chat
+          const escapes = !keepTarget && chat.slotSwitchOrigin !== null && chat.slotSwitchOrigin.key !== key
+          if (escapes) dispatch(removeSlotOptimistic(key))
+        }
+        return rejectWithValue(payload)
+      }
       throw e
     }
   },

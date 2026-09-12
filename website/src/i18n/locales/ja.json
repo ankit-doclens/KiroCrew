@@ -14655,6 +14655,7 @@
   },
   "store": {
     "chatSlice": {
+      "session_gone": "そのセッションは存在しません。",
       "truncated": "…(省略)"
     }
   },

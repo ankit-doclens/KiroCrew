@@ -14655,6 +14655,7 @@
   },
   "store": {
     "chatSlice": {
+      "session_gone": "此会话已不存在。",
       "truncated": "…（已截断）"
     }
   },

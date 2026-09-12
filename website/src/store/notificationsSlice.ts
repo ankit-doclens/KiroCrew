@@ -211,11 +211,29 @@ const notificationsSlice = createSlice({
   initialState,
   reducers: {
     addNotification(state, action: PayloadAction<Notification>) {
-      if (!state.items.some(n => n.ts === action.payload.ts)) {
-        state.items.push(action.payload)
-        state.items = capped(state.items)
-        pruneAckStamps(state)
+      const p = action.payload
+      const clash = state.items.find(n => n.ts === p.ts)
+      if (clash) {
+        // Same ts, same content: the same notification delivered again (an
+        // SSE replay after reconnect, a re-synced approval). Dropping it is
+        // the dedupe this reducer has always provided.
+        if (clash.title === p.title && clash.body === p.body && clash.kind === p.kind) return
+        // Same ts, different content: two DISTINCT notifications whose minted
+        // ts collided — client-side callers mint `String(Date.now())`, so two
+        // in one millisecond used to silently lose the second. Disambiguate
+        // here, at the one chokepoint every caller shares, instead of each
+        // caller carrying its own counter. The nudge stays in FRACTIONAL
+        // digits because `parseTs` accepts `\d+(\.\d+)?`; any other shape
+        // renders as "Invalid Date" in the feed.
+        const base = p.ts.includes('.') ? p.ts : p.ts + '.'
+        let n = 1
+        while (state.items.some(i => i.ts === base + String(n))) n += 1
+        state.items.push({ ...p, ts: base + String(n) })
+      } else {
+        state.items.push(p)
       }
+      state.items = capped(state.items)
+      pruneAckStamps(state)
     },
     ackNotificationByTs(state, action: PayloadAction<string>) {
       if (action.payload === '*') {

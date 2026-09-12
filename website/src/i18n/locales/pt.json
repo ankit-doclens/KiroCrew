@@ -15037,6 +15037,7 @@
   },
   "store": {
     "chatSlice": {
+      "session_gone": "Essa sessão não existe mais.",
       "truncated": "…(truncado)"
     }
   },

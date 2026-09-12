@@ -370,16 +370,6 @@ import { fmtMessageTime, fmtMessageTimeFull } from './chat/messageTime'
  * `instanceof Error` test always fails and every user would read the developer
  * fallback. Read `message` structurally instead, with a plain-language fallback.
  */
-/** Unique `ts` for a client-side notification that the feed can still PARSE.
- *  `addNotification` dedupes on `ts`, so two entries in the same millisecond would
- *  see the second silently dropped — which for a payload-carrying entry discards
- *  the user's message. The disambiguator goes in FRACTIONAL digits because
- *  `parseTs` only accepts `\d+(\.\d+)?`; a `<ms>-<n>` form falls through to
- *  `new Date(string)`, which is Invalid Date in V8 → "Invalid Date" headers and
- *  "NaNd ago" in the bell feed. */
-let notificationTsSeq = 0
-const uniqueNotificationTs = (): string => `${Date.now()}.${notificationTsSeq++}`
-
 
 const createFailReason = (e: unknown): string => {
   const msg = typeof e === 'object' && e !== null ? (e as { message?: unknown }).message : undefined
@@ -1304,7 +1294,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       })
       showActionError(restageBody, restageTitle)
       dispatch(addNotification({
-        ts: uniqueNotificationTs(),
+        ts: String(Date.now()),
         kind: 'agent',
         priority: 'critical',
         title: restageTitle,
@@ -2495,7 +2485,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
             const queuedBody = i18nT('pages.chatPage.message_queued_until_session_ready', { error: createFailReason(e) })
             showActionError(queuedBody, i18nT('pages.chatPage.could_not_start_a_new_session'))
             dispatch(addNotification({
-              ts: uniqueNotificationTs(),
+              ts: String(Date.now()),
               kind: 'agent',
               priority: 'critical',
               title: i18nT('pages.chatPage.could_not_start_a_new_session'),
@@ -2516,7 +2506,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           const draftBody = i18nT('pages.chatPage.message_saved_as_draft', { error: createFailReason(e), extra: lostContext })
           showActionError(draftBody, i18nT('pages.chatPage.could_not_start_a_new_session'))
           dispatch(addNotification({
-            ts: uniqueNotificationTs(),
+            ts: String(Date.now()),
             kind: 'agent',
             priority: 'critical',
             title: i18nT('pages.chatPage.could_not_start_a_new_session'),
@@ -3512,7 +3502,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       // is transient and lives in the notification centre.
       showActionError(body, title)
       dispatch(addNotification({
-        ts: uniqueNotificationTs(),
+        ts: String(Date.now()),
         kind: 'agent',
         priority: 'critical',
         title,

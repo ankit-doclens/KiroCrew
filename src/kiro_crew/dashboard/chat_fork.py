@@ -155,6 +155,25 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             # app-scoped caller enumerating slots across the isolation boundary
             # (CWE-204). The true reason is recorded server-side via SEL above.
             return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+        # Owning the SLOT is not owning the TRANSCRIPT. A channel-linked slot
+        # (``linked_session_key``) or an unbound channel-born one
+        # (``channel_origin``) reads its source through ``slot_history_key``,
+        # which resolves onto the channel's own transcript -- and the fork
+        # writes those messages into a NEW slot minted with the app's scope and
+        # no link, i.e. a plain app-owned slot every downstream boundary
+        # (send, export) waves through. Refusing here is what keeps those
+        # boundaries meaningful: fail closed, same 404 as above
+        # (anti-enumeration), truth in SEL. The dashboard owner is unaffected.
+        if getattr(slot, "linked_session_key", "") or getattr(slot, "channel_origin", False):
+            sel().log_api_access(
+                caller=request_app,
+                operation="chat.slot_fork",
+                outcome="denied",
+                source="app_isolation",
+                resources=f"slot={name}",
+                error="app cannot fork a channel-backed slot",
+            )
+            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
 
     source_memory_identity = (
         effective_session_key(slot),
@@ -163,6 +182,15 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
         slot.memory_mode,
         slot_history_key(slot),
     )
+    # The transcript key the reads below are authorized against, resolved HERE,
+    # on the same side of every await as the app guard above. The reads pass
+    # THIS key rather than re-resolving ``slot_history_key(slot)`` after a
+    # suspension: a channel/cron injection can bind ``linked_session_key``
+    # while a read is off the loop, and a live re-resolve would follow the new
+    # link onto a transcript no check in this handler ever authorized.
+    # ``_source_identity_unchanged`` still refuses the fork when the binding
+    # moves; the pin makes the reads themselves incapable of crossing it.
+    authorized_history_key = source_memory_identity[4]
 
     # Incognito and temporary sessions fork like any other. Nothing about a fork
     # engages what those modes actually guarantee -- no consolidation or lessons
@@ -467,7 +495,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
                 else:
                     tail = []
                 all_messages = await asyncio.to_thread(
-                    state.conversation_log.read_messages_chained, slot_history_key(slot)
+                    state.conversation_log.read_messages_chained, authorized_history_key
                 )
                 if not (
                     slot._disk_window_len == disk_len_before
@@ -734,7 +762,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             try:
                 _mid_rotation = await asyncio.to_thread(
                     state.conversation_log.chain_mid_rotation,
-                    slot_history_key(slot),
+                    authorized_history_key,
                 )
             except Exception:
                 # Same reasoning as the slot-detail probe: a False fallback picks
@@ -749,7 +777,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
                 try:
                     _full_disk = await asyncio.to_thread(
                         state.conversation_log.read_messages_chained_full,
-                        slot_history_key(slot),
+                        authorized_history_key,
                     )
                     _tail = (
                         all_messages[len(all_messages) - _fork_tail_len :] if _fork_tail_len else []

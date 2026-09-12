@@ -236,6 +236,23 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
             )
             return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
 
+        # The second way a slot's transcript can be a channel's: a channel-born
+        # slot the dashboard could not bind carries ``channel_origin`` with an
+        # EMPTY link, and ``expected_history_key`` below -- the transcript the
+        # rewrite lands on -- then resolves through ``slot_transcript_key`` onto
+        # the channel's own file (see ``slot_history_key``). Same refusal,
+        # same shape.
+        if request_app and getattr(slot, "channel_origin", False):
+            sel().log_api_access(
+                caller=request_app,
+                operation="chat.slot_rewind",
+                outcome="denied",
+                source="app_isolation",
+                resources=f"slot={name}",
+                error="app cannot rewind a channel-origin slot",
+            )
+            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+
         # The transcript this rewind was authorized against. A concurrent
         # rebinding (a cron injection re-linking the slot) moves the slot to
         # another transcript while the boundaries below are pending; the

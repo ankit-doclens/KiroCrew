@@ -789,6 +789,205 @@ async def test_send_refuses_an_app_that_does_not_own_the_slot(monkeypatch):
     assert sent == [], "nothing may be delivered for a slot the app does not own"
 
 
+def _send_session_env(monkeypatch, slot, *, app=""):
+    """Wire up the handler's collaborators around *slot* for an app-boundary test.
+
+    Returns ``(request, sent, bundled, audits)``: the request to hand the
+    handler, the bundles the tunnel manager delivered, the slots the (stubbed)
+    bundle builder was called with, and the ``(operation, outcome, error)``
+    audit rows -- so a refusal test can assert the builder was never reached
+    and the denial was recorded.
+    """
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    monkeypatch.setattr(
+        hi.KiroCrewConfig,
+        "load",
+        staticmethod(lambda: SimpleNamespace(instances=SimpleNamespace(enabled=True))),
+    )
+
+    bundled: list = []
+
+    async def _bundle(_state, _slot, **_kw):
+        bundled.append(_slot)
+        return {"bundle_version": BUNDLE_VERSION, "messages": list(_slot.messages)}
+
+    monkeypatch.setattr(hi, "build_transfer_bundle_async", _bundle)
+
+    audits: list = []
+    monkeypatch.setattr(
+        hi,
+        "_audit",
+        lambda op, outcome, **kw: audits.append((op, outcome, kw.get("error", ""))),
+    )
+
+    sent: list = []
+
+    class _Mgr:
+        async def send_session_bundle(self, _id, bundle):
+            sent.append(bundle)
+            return True, {"key": "remote-1"}
+
+    state = SimpleNamespace(
+        _slots={slot.key: slot},
+        instances_manager=_Mgr(),
+        instances_registry=SimpleNamespace(get=lambda _i: SimpleNamespace(id="peer")),
+    )
+    request = SimpleNamespace(
+        app={"state": state},
+        match_info={"id": "peer"},
+        headers={},
+        get=lambda k, default="": {"user": "owner", "app": app}.get(k, default),
+        json=_async_value({"slot": slot.key}),
+    )
+    return request, sent, bundled, audits
+
+
+async def _not_owned_send_response(monkeypatch):
+    """The reference refusal: an app naming a slot owned by ANOTHER app."""
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    slot = _slot([{"role": "user", "content": "secret", "ts": ""}])
+    slot.key = "slot-1"
+    slot._app = "owner-app"
+    request, _sent, _bundled, _audits = _send_session_env(monkeypatch, slot, app="other-app")
+    return await hi.api_instances_send_session(request)
+
+
+@pytest.mark.asyncio
+async def test_send_refuses_an_app_owned_slot_with_a_channel_link(monkeypatch):
+    """Owning the SLOT is not owning the TRANSCRIPT.
+
+    ``get_or_create_slot`` auto-binds ``linked_session_key`` from a
+    channel-shaped slot NAME the creating caller supplies, and the bundle
+    builder reads the transcript through ``slot_history_key``, which follows
+    that link first -- so an app could pass the ownership check with a slot
+    whose conversation belongs to a channel it has no claim on. The boundary
+    refuses before the builder runs, mirroring chat_rewind and the export.
+    """
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    slot = _slot([{"role": "user", "content": "channel talk", "ts": ""}])
+    slot.key = "slot-1"
+    slot._app = "my-app"
+    slot.linked_session_key = "slack:1700000000.000100"
+
+    request, sent, bundled, audits = _send_session_env(monkeypatch, slot, app="my-app")
+    resp = await hi.api_instances_send_session(request)
+
+    assert resp.status == 404
+    assert json.loads(resp.body)["code"] == "transfer_slot_not_found"
+    assert bundled == [], "the bundle builder must never see a channel-linked slot"
+    assert sent == []
+    assert ("send_session", "denied", "app cannot send a channel-linked slot") in audits
+
+    # The refusal must be byte-identical to the not-owned answer, or the
+    # response itself tells an app which of its slots carry a channel link.
+    reference = await _not_owned_send_response(monkeypatch)
+    assert resp.status == reference.status
+    assert resp.body == reference.body
+
+
+@pytest.mark.asyncio
+async def test_send_refuses_an_app_owned_channel_origin_slot_with_an_empty_link(monkeypatch):
+    """The second way a slot's transcript can be a channel's: an unbound
+    channel-born slot (``channel_origin`` set, link empty) resolves through
+    ``slot_transcript_key`` onto the channel's own transcript."""
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    slot = _slot([{"role": "user", "content": "channel talk", "ts": ""}])
+    slot.key = "slot-1"
+    slot._app = "my-app"
+    slot.channel_origin = True
+
+    request, sent, bundled, audits = _send_session_env(monkeypatch, slot, app="my-app")
+    resp = await hi.api_instances_send_session(request)
+
+    assert resp.status == 404
+    assert json.loads(resp.body)["code"] == "transfer_slot_not_found"
+    assert bundled == []
+    assert sent == []
+    assert ("send_session", "denied", "app cannot send a channel-origin slot") in audits
+
+    reference = await _not_owned_send_response(monkeypatch)
+    assert resp.status == reference.status
+    assert resp.body == reference.body
+
+
+@pytest.mark.asyncio
+async def test_send_refuses_when_the_slot_is_bound_during_the_build(monkeypatch):
+    """The guard is re-checked on BOTH sides of the awaited build.
+
+    The pre-build guards read the binding at one instant; a channel/cron
+    injection can set ``linked_session_key`` while the builder is off the
+    loop, redirecting its transcript read. Links are only ever set, never
+    cleared, so the post-build re-check sees the raced bind and discards the
+    bundle instead of delivering it.
+    """
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    slot = _slot([{"role": "user", "content": "app talk", "ts": ""}])
+    slot.key = "slot-1"
+    slot._app = "my-app"
+
+    request, sent, bundled, audits = _send_session_env(monkeypatch, slot, app="my-app")
+
+    async def _binding_bundle(_state, _slot, **_kw):
+        bundled.append(_slot)
+        # The race: a bind lands while the build is suspended off the loop.
+        _slot.linked_session_key = "slack:1700000000.000100"
+        return {"bundle_version": BUNDLE_VERSION, "messages": list(_slot.messages)}
+
+    monkeypatch.setattr(hi, "build_transfer_bundle_async", _binding_bundle)
+
+    resp = await hi.api_instances_send_session(request)
+
+    assert resp.status == 404
+    assert json.loads(resp.body)["code"] == "transfer_slot_not_found"
+    assert sent == [], "a bundle built across a raced bind must never be delivered"
+    assert (
+        "send_session",
+        "denied",
+        "slot bound to a channel during the transfer build",
+    ) in audits
+
+
+@pytest.mark.asyncio
+async def test_the_dashboard_owner_can_still_send_a_channel_linked_slot(monkeypatch):
+    """The owner is entitled to both the slot and the channel conversation it
+    displays; the app-boundary refusal must not reach them."""
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    slot = _slot([{"role": "user", "content": "channel talk", "ts": ""}])
+    slot.key = "slot-1"
+    slot.linked_session_key = "slack:1700000000.000100"
+
+    request, sent, bundled, _audits = _send_session_env(monkeypatch, slot, app="")
+    resp = await hi.api_instances_send_session(request)
+
+    assert resp.status == 200
+    assert bundled == [slot]
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_app_can_still_send_its_own_unlinked_slot(monkeypatch):
+    """The guard is scoped to the two channel-transcript shapes: a plain
+    app-owned slot keeps transferring."""
+    from kiro_crew.dashboard import handlers_instances as hi
+
+    slot = _slot([{"role": "user", "content": "app talk", "ts": ""}])
+    slot.key = "slot-1"
+    slot._app = "my-app"
+
+    request, sent, bundled, _audits = _send_session_env(monkeypatch, slot, app="my-app")
+    resp = await hi.api_instances_send_session(request)
+
+    assert resp.status == 200
+    assert bundled == [slot]
+    assert len(sent) == 1
+
+
 @pytest.mark.asyncio
 async def test_snapshot_retries_on_an_in_place_edit_during_assembly():
     """Regression: an in-place edit moves neither the boundary nor the count.

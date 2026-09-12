@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         check_memory_available,
         create_agent_folder,
         logger,
+        platform_compat,
         redact_credentials,
         redact_exfiltration_urls,
         sel,
@@ -224,6 +225,27 @@ class SpawnAdmissionCoordinator(ManagerComponent):
                 batch_total=max(0, int(batch_total)),
             )
             return self._manager._announce_rejection(info)
+        if avail_gb < 0 and platform_compat.IS_LINUX:
+            # The guard did not run: /proc/meminfo was unreadable on the one
+            # platform where it must exist. Proceeding is the stated fail-open
+            # contract for an unmeasurable host, but on Linux it must be
+            # observable rather than indistinguishable from a healthy check
+            # (#9894). macOS/Windows structurally lack /proc/meminfo, so
+            # emitting there would fire on every spawn and drown the signal.
+            logger.warning(
+                "Subagent memory guard could not run (min %.1f GB); proceeding unchecked",
+                min_mem,
+            )
+            sel().log_tool_invocation(
+                session_key=parent_session_key or "",
+                source="subagent",
+                tool_name="spawn_run",
+                outcome="memory_check_unavailable",
+                metadata={
+                    "min_gb": min_mem,
+                    "task": _redacted_task[:120],
+                },
+            )
 
         # --- Admission gate: refuse NEW spawns while host memory posture is
         # critical. Complements the absolute spawn_min_memory_gb floor above

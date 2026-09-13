@@ -62,7 +62,6 @@ from kiro_crew.config.paths import config_dir
 from kiro_crew.platform.admission import (
     canonical_signing_bytes,
     hmac_signature,
-    policy_trust_root_path,
     read_policy_trust_root,
 )
 from kiro_crew.platform.context import PlatformCompositionError
@@ -1435,6 +1434,40 @@ SCOPE_CATALOG: Dict[str, ScopeSpec] = {
     # mobile_connect listing). Data row only — CONTRACT_VERSION and the
     # evaluator are untouched.
     "capabilities.social_share": ScopeSpec(CAPABILITY, capability_default=True),
+    # Hosted feature-video clips: the gateway fetches a signed manifest from a
+    # vendor CDN and then downloads media from it into the data home
+    # (``feature_videos_manifest`` / ``feature_videos_cache``). That is outbound
+    # traffic to a vendor endpoint plus third-party bytes landing on disk, which a
+    # managed fleet frequently may not do at all — so this row sits in the egress
+    # family with ``capabilities.telemetry`` and ``capabilities.publish`` rather
+    # than with the advisory probes, and is enforced FAIL-CLOSED: an unevaluable
+    # ceiling denies.
+    #
+    # Default True: naming the row without ``enabled`` keeps the documented
+    # behaviour for the standalone user, who additionally has the
+    # ``dashboard.feature_videos_enabled`` kill switch and a URL override. (An
+    # unnamed row is ungoverned and permitted regardless of this default — see the
+    # CAPABILITY-DEFAULT CONTRACT above.) An enterprise that wants no vendor fetch
+    # says so, and unlike the config switches this row is read from the trust-root
+    # ``security_policy.json``, which the agent cannot REWRITE from any surface:
+    # its file tools refuse the path (``security._SENSITIVE_HOME_DIRS``, the
+    # read+write fence, so those tools cannot read it either) and the OS sandbox
+    # mounts the keystone read-only in every mode. A shell READ of it is permitted
+    # by design (see ``security/paths.py``) — the ceiling is not a secret, it is a
+    # bound — and ``kirocrew policy show`` prints the same posture summary.
+    # Consulted at THREE chokepoints, because any one alone is a half-control:
+    #   * the manifest fetch — no request is made, so nothing is learned;
+    #   * each clip request in the download pass — no media lands on disk;
+    #   * ``POST /api/feature-videos/fetch-all`` — refused 403 rather than
+    #     accepted into a task that would deny itself.
+    # All three are server-side, and that is the whole surface: the browser is
+    # never handed a CDN url (an uncached hosted clip is not offered at all), so
+    # there is no client-side fetch for the ceiling to miss.
+    # Already-cached clips keep playing under a denial: withdrawing bytes already
+    # on disk is a separate decision this row does not make.
+    # Data row only — CONTRACT_VERSION and the evaluator are untouched (mirrors
+    # social_share).
+    "capabilities.feature_videos_download": ScopeSpec(CAPABILITY, capability_default=True),
 }
 
 
@@ -2898,24 +2931,31 @@ def _policy_trust_settings() -> Tuple[bool, Dict[str, str]]:
 def _policy_signature_required() -> bool:
     """True when the admission policy explicitly opted in.
 
-    A trust root that is absent, unreadable, or not a JSON object reads as **no
-    opt-in**, and that is deliberate rather than a gap.  An attacker who can write
-    ``admission_policy.json`` is explicitly out of this feature's threat model (see
-    the threat-model note in ``docs/system-specs/modules/governance.md``) — such a
-    process would simply set the flag to ``false``, which is well-formed JSON, so
-    fail-closing on a *malformed* file only catches a clumsy version of an attack
-    the design already concedes.  What a corrupt trust root actually indicates in
-    practice is a non-atomic fleet push or a hand-edit typo — a reliability event —
-    and the useful response to that is to log loudly and behave predictably, which
-    ``read_policy_trust_root`` already does.  ``kirocrew doctor`` surfaces it.
+    Routed through :func:`_policy_trust_settings` — and thus
+    ``admission.AdmissionPolicy.from_dict`` and its strict ``_coerce_flag``
+    reader — so the opt-in flag and the ``trust_keys`` the verifier consults
+    are read by ONE parser.  Two independent readers of the same field is how
+    a well-formed trust root carrying ``"require_policy_signature": null``
+    can log a fail-closed warning on one path while the enforcement path
+    silently reads the gate as off: with the shared reader, a flag that is
+    present but not a real JSON boolean reads fail-closed as opted-IN.
+
+    A trust root that is absent, unreadable, or not a JSON object still reads
+    as **no opt-in**, and that is deliberate rather than a gap.  An attacker
+    who can write ``admission_policy.json`` is explicitly out of this
+    feature's threat model (see the threat-model note in
+    ``docs/system-specs/modules/governance.md``) — such a process would simply
+    set the flag to ``false``, which is well-formed JSON, so fail-closing on a
+    *malformed* file only catches a clumsy version of an attack the design
+    already concedes.  What a corrupt trust root actually indicates in
+    practice is a non-atomic fleet push or a hand-edit typo — a reliability
+    event — and the useful response to that is to log loudly and behave
+    predictably, which ``read_policy_trust_root`` already does.  ``kirocrew
+    doctor`` surfaces it.
 
     Never raises.
     """
-    try:
-        data = json.loads(policy_trust_root_path().read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return bool(isinstance(data, dict) and data.get("require_policy_signature", False))
+    return _policy_trust_settings()[0]
 
 
 def _audit_policy_signature(state: str, detail: str, path_label: str) -> None:

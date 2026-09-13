@@ -137,6 +137,9 @@ export interface WorkflowDefinitionWrite {
 export type MonitorWrite = {
   slot_key?: string
   kind?: 'github_pull_request'
+    | 'gitlab_merge_request'
+    | 'azure_devops_pull_request'
+    | 'bitbucket_pull_request'
   objective?: 'review_ready'
   target?: string
   cadence_secs?: number
@@ -1929,6 +1932,17 @@ export interface KiroPrerequisiteStatus {
    */
   missing_agent_specs: string[]
   /**
+   * Why the last version probe did not verify the CLI when neither typed
+   * condition above (sandbox refusal, timeout) explains it — the probe's own
+   * failure text, or the tail of its output on a non-zero exit. Empty when the
+   * probe passed, never ran, or a typed field already carries the cause. Shown
+   * verbatim, untranslated, in the retry screen so it names WHY instead of just
+   * that the check failed.
+   */
+  probe_error?: string
+  /** The failed probe's exit status; absent when it did not exit. */
+  probe_status?: number | null
+  /**
    * Failure text from the repair the Check again button attempts when specs are
    * missing. Empty when none was attempted or it succeeded. Shown verbatim and
    * untranslated: it names the failing install step.
@@ -3063,14 +3077,28 @@ export const api = {
   /**
    * The crew appearance library — the packs a crew can wear.
    *
-   * Owner-gated, same-origin cookie auth. There is deliberately no `detail`
-   * wrapper: that route inlines every file in the pack, so drawing a grid of
-   * thumbnails through it would load N whole packs to show N frames. The picker
-   * reads the per-slot route through an `<img>` instead (`packSlotUrl`), and
-   * `detail` lands here with its first real caller.
+   * Owner-gated, same-origin cookie auth.
    */
   appearances: {
     list: () => fetch('/api/appearances').then(j) as Promise<{ packs?: unknown }>,
+    /**
+     * The whole pack, inlined. Read it through `hooks/usePackDetail` (a React
+     * Query entry, `staleTime: Infinity`) rather than directly: this route
+     * carries every file in the pack, so one read per pack per session is the
+     * budget, and a grid or roster calling it per avatar would load N whole packs
+     * to draw N frames. The crew avatar pays that one read per WORN pack to learn
+     * each slot's format (the per-slot route cannot say it before the request);
+     * `packDetailFrom` then keeps the bytes only for a Lottie slot, so the cache
+     * never pins an svg or a base64 sheet no renderer reads from here. The three
+     * shipped sample bundles are 1-4 KB; a content-free detail variant is the
+     * follow-up if real packs prove otherwise.
+     *
+     * A renderer needs it because the FORMAT lives per slot — the player has to
+     * be chosen before any bytes are requested, which the per-slot route
+     * (`packSlotUrl`) cannot answer.
+     */
+    detail: (id: string) =>
+      fetch('/api/appearances/' + encodeURIComponent(id)).then(j) as Promise<unknown>,
     /** Install an exported pack. The JSON envelope, not multipart: the bundle is
      *  already parsed client-side to reject an obviously wrong pick, so posting
      *  it back as a file would only re-serialize what we hold. */

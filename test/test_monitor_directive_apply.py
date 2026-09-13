@@ -10,9 +10,89 @@ from kiro_crew.autonudge_authz import authorize_and_update_monitor
 from kiro_crew.dashboard.session_directive_apply import apply_session_directive
 from kiro_crew.monitoring.models import (
     MonitorBudgets,
+    MonitorCreationSurface,
     MonitorDispatchResult,
     MonitorOutcome,
 )
+
+
+@pytest.mark.asyncio
+async def test_channel_origin_survives_a_linked_dashboard_monitor_binding(tmp_path):
+    service = AutoNudgeService(base_dir=tmp_path)
+    state = SimpleNamespace(
+        _slots={"chat-1": SimpleNamespace(workspace="default", is_closing=False)},
+        sessions=None,
+        channel_transports={},
+    )
+    with (
+        patch("kiro_crew.autonudge.get_instance", return_value=service),
+        patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+    ):
+        result = await apply_session_directive(
+            state,
+            SimpleNamespace(key="chat-1", _app=""),
+            "dashboard:chat-1",
+            "monitor_watch",
+            {
+                "kind": "bitbucket_pull_request",
+                "target": "https://bitbucket.org/acme/widgets/pull-requests/10",
+                "objective": "review_ready",
+                "cadence_secs": 60,
+                "max_runtime_secs": 600,
+                "max_agent_turns": 4,
+                "max_tokens": 10_000,
+                "max_provider_errors": 2,
+                "wake_instructions": "Check CI.",
+            },
+            producer_is_user_facing=True,
+            producer_is_channel=True,
+        )
+
+    assert "started" in result
+    loop = service.get_by_slot("chat-1")
+    assert loop is not None and loop.monitor is not None
+    assert loop.monitor.creation_surface is MonitorCreationSurface.CHANNEL
+    service.stop()
+
+
+@pytest.mark.asyncio
+async def test_channel_origin_retarget_downgrades_dashboard_monitor_credentials(tmp_path):
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add_monitor(
+        slot_key="chat-1",
+        kind="bitbucket_pull_request",
+        target="https://bitbucket.org/acme/widgets/pull-requests/10",
+        objective="review_ready",
+        cadence_secs=60,
+        budgets=MonitorBudgets(),
+        creation_surface=MonitorCreationSurface.DASHBOARD,
+    )
+    state = SimpleNamespace(
+        _slots={"chat-1": SimpleNamespace(workspace="default", is_closing=False)},
+        sessions=None,
+        channel_transports={},
+    )
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+        ):
+            result = await apply_session_directive(
+                state,
+                SimpleNamespace(key="chat-1", _app=""),
+                "dashboard:chat-1",
+                "monitor_update",
+                {"patch": {"target": "https://bitbucket.org/acme/widgets/pull-requests/11"}},
+                producer_is_user_facing=True,
+                producer_is_channel=True,
+            )
+        monitor = loop.monitor
+    finally:
+        service.stop()
+    assert "updated" in result
+    assert monitor is not None
+    assert monitor.target == "https://bitbucket.org/acme/widgets/pull-requests/11"
+    assert monitor.creation_surface is MonitorCreationSurface.CHANNEL
 
 
 @pytest.mark.asyncio
@@ -184,15 +264,20 @@ async def test_refused_structured_monitor_stop_is_audited_as_denied(tmp_path):
 async def test_watch_update_and_stop_are_authoritative_and_owned(tmp_path):
     service = AutoNudgeService(base_dir=tmp_path)
     state = SimpleNamespace(
-        _slots={"chat-1": SimpleNamespace(workspace="default")},
+        _slots={"chat-1": SimpleNamespace(workspace="default", is_closing=False)},
         sessions=None,
         channel_transports={},
     )
     slot = SimpleNamespace(key="chat-1", _app="")
     audit = MagicMock()
+    load_hosts = AsyncMock(return_value=frozenset())
     with (
         patch("kiro_crew.autonudge.get_instance", return_value=service),
         patch("kiro_crew.autonudge_authz.sel", return_value=audit),
+        patch(
+            "kiro_crew.dashboard.handlers.source_providers.ensure_gitlab_hosts_loaded",
+            load_hosts,
+        ),
     ):
         created = await apply_session_directive(
             state,
@@ -251,6 +336,7 @@ async def test_watch_update_and_stop_are_authoritative_and_owned(tmp_path):
         assert loop.monitor.last_wake_fingerprint == ""
         assert loop.monitor.last_completion_fingerprint == ""
         assert loop.monitor.consecutive_provider_errors == 0
+        load_hosts.assert_awaited_once_with()
         stopped = await apply_session_directive(
             state,
             slot,
@@ -418,7 +504,7 @@ async def test_structured_fields_cannot_silently_patch_a_legacy_loop(tmp_path):
 async def test_monitor_watch_does_not_replace_a_legacy_loop(tmp_path):
     service = AutoNudgeService(base_dir=tmp_path)
     legacy = await service.add("chat-1", "legacy prompt", idle_secs=60)
-    slot = SimpleNamespace(key="chat-1", workspace="default", _app="")
+    slot = SimpleNamespace(key="chat-1", workspace="default", _app="", is_closing=False)
     state = SimpleNamespace(_slots={"chat-1": slot}, sessions=None, channel_transports={})
     with patch("kiro_crew.autonudge.get_instance", return_value=service):
         result = await apply_session_directive(
@@ -455,7 +541,7 @@ async def test_monitor_start_does_not_replace_a_structured_monitor(tmp_path):
         cadence_secs=60,
         budgets=MonitorBudgets(),
     )
-    slot = SimpleNamespace(key="chat-1", workspace="default", _app="")
+    slot = SimpleNamespace(key="chat-1", workspace="default", _app="", is_closing=False)
     state = SimpleNamespace(_slots={"chat-1": slot}, sessions=None, channel_transports={})
     with patch("kiro_crew.autonudge.get_instance", return_value=service):
         result = await apply_session_directive(
@@ -523,7 +609,11 @@ async def test_banner_cannot_silently_patch_a_structured_monitor(tmp_path):
         budgets=MonitorBudgets(),
     )
     state = SimpleNamespace(
-        _slots={"chat-1": SimpleNamespace(workspace="default", mode="", memory_mode="persistent")},
+        _slots={
+            "chat-1": SimpleNamespace(
+                workspace="default", mode="", memory_mode="persistent", is_closing=False
+            )
+        },
         sessions=None,
         channel_transports={},
     )

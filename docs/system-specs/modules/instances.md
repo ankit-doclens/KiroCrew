@@ -255,7 +255,14 @@ non-POSIX (§12). Treat a Windows hub as unverified.
    capped-exponential backoff (`recover_backoff_max_secs`, 30s; the wait grows
    1, 2, 4, 8, 16 then holds at the cap), which spans roughly a two-minute
    window: long enough to outlast a transient drop (screen lock, proxy warmup).
-   The counter resets on a successful rebuild or a successful `connect()`. If it
+   The counter resets on a successful rebuild or a successful `connect()`. A
+   successful rebuild records the replacement child's `local_port` alongside its
+   `forwarder_pid` / `forwarder_start` / `forwarder_sig` in one write — the same
+   field set `connect()` persists. A rebuild takes its port from the live
+   tunnel, and `forwarder_sig` is a MAC over that port, so the port travels with
+   the identity that signs it; recording one without the other points both the
+   pane URL and the reclaim's signature check at a port the recorded child is
+   not bound to. If it
    gives up, the diagnosis ladder runs automatically. The slow SSH I/O runs
    *without* the manager lock so self-heal cannot stall a concurrent
    connect/disconnect/shutdown.
@@ -844,7 +851,7 @@ its real jobs.
 |---|---|
 | `GET /api/cloud/preflight?profile=&region=` | AWS reachability + the prerequisite checklist (the doctor checks as JSON). |
 | `GET /api/cloud/iam-policy` | The minimum IAM policy document to paste into the user's account. |
-| `GET /api/cloud/provisioners` | The lanes the Set-up tab may offer: `{id, kind, label, posix_only, steps}` per provisioner, from the CPP `remote_provisioners` seam ([platform-context.md](platform-context.md)). The stock build lists the single `aws_ec2` lane. Answers on every platform, like the two history routes: the tab needs it to pick a form, and each row's `posix_only` carries the platform answer for that lane. |
+| `GET /api/cloud/provisioners` | The lanes the Set-up tab may offer: `{id, kind, label, posix_only, steps}` per provisioner, from the CPP `remote_provisioners` seam ([platform-context.md](platform-context.md)). The stock build lists the single `aws_ec2` lane. Answers on every platform, like the two history routes: the tab needs it to pick a form, and each row's `posix_only` carries the platform answer for that lane. Adding a lane: [adding-a-remote-provisioner.md](../../guides/adding-a-remote-provisioner.md). |
 | `GET /api/cloud/launch` | List launch jobs, in progress and finished. |
 | `POST /api/cloud/launch` | Start a launch job; returns the job immediately. `409` when one is already in flight. Body `{provider_id?, profile, region, size_key}`; `provider_id` defaults to `aws_ec2`, and an id the seam does not list or cannot back answers `400 unknown_provisioner` before any job file exists. The job carries `provider_id`, and its step labels are the provisioner's. |
 | `GET /api/cloud/launch/{id}` | Poll one job: per-step state plus the device-code prompt while signing in. |

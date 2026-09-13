@@ -830,6 +830,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "chat.compact-empty-folders",
+    "label": "Compact Empty Folders",
+    "labelKey": "pages.settings.chatPanel.compact_empty_folders",
+    "description": "A folder with no chats takes one row instead of two, and its New chat button moves onto the folder's own row",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1
+  },
+  {
     "id": "chat.completion-event-characters",
     "label": "Completion Event Characters",
     "labelKey": "pages.settings.chatPanel.completion_event_characters",
@@ -1130,6 +1139,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "labelKey": "pages.settings.chatPanel.soft_stop_budget_seconds",
     "tab": "chat",
     "type": "input",
+    "occurrence": 1
+  },
+  {
+    "id": "chat.split-side-by-side-diffs",
+    "label": "Split (side-by-side) diffs",
+    "labelKey": "settings.chat.diffLayout.label",
+    "description": "Show old and new code in two columns; off shows one unified column. Changing it here or on any diff sets it everywhere.",
+    "tab": "chat",
+    "type": "toggle",
     "occurrence": 1
   },
   {

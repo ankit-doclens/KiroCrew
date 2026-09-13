@@ -9,11 +9,21 @@ global.
 from __future__ import annotations
 
 import logging
+from importlib import metadata
 
 import pytest
 
 from kiro_crew.config import loader as _loader_module
 from kiro_crew.config import validation
+
+
+def test_published_metadata_requires_config_validator() -> None:
+    """A base install must declare the validator used by the config loader."""
+    requirements = metadata.requires("kirocrew") or []
+    assert any(
+        req.lower().startswith("jsonschema") and "extra" not in req.partition(";")[2].lower()
+        for req in requirements
+    ), requirements
 
 
 class TestConfigCache:

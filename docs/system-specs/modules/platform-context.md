@@ -92,6 +92,8 @@ interface, the public edition is complete standalone.
 > is added here; the existing EC2 lane carries none today, and a
 > `capabilities.remote_provisioners` row mirroring `capabilities.mobile_connect`
 > is the natural follow-up once a second lane exists to narrow on.
+>
+> Contributor walkthrough: [adding-a-remote-provisioner.md](../../guides/adding-a-remote-provisioner.md).
 
 > `external_access` note — three surfaces the core offers unconditionally, none of
 > which had a composition point. Two are installable-content registries: skill
@@ -316,6 +318,17 @@ Policy shape (`admission_policy.json`):
   "capability_ceiling": {"egress": ["*.example.com"], "tools": ["enterprise-mcp"]}
 }
 ```
+
+**Strict gate-flag reading.** `require_signature` and
+`require_policy_signature` are read strictly by `_coerce_flag`: a real JSON
+boolean is honoured, an absent key leaves the gate off (the documented
+default), and any other present value — explicit `null`, the string
+`"false"`, `0`, `1` — is warned about and read as **on**, the fail-closed
+direction (#9641). `bool()` on the raw value used to read any non-empty
+string as ON but `null`/`""` as OFF, so a template rendering
+`"require_policy_signature": null` silently disabled the gate. Same
+strict-read shape as the `boot` gate flags in
+[governance](governance.md) (#9176).
 
 **This policy is also the trust root for the security ceiling.**
 `require_policy_signature` (default `false`) additionally demands a *verified*

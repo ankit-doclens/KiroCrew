@@ -192,7 +192,12 @@ class TestTheDataHomeIsPinnedForEveryTestpath:
         """
         pinned = {
             key: os.environ[key]
-            for key in ("KIROCREW_HOME", "KIROCREW_WORKSPACE", "KIROCREW_PROFILE", "KIROCREW_TELEMETRY")
+            for key in (
+                "KIROCREW_HOME",
+                "KIROCREW_WORKSPACE",
+                "KIROCREW_PROFILE",
+                "KIROCREW_TELEMETRY",
+            )
         }
         monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "mine"))
         monkeypatch.setattr(os, "name", os.name)  # the shape the real call site undid
@@ -447,12 +452,19 @@ class TestTheFloorSurvivesATestsOwnUndo:
 
         monkeypatch.undo()
 
-        assert "KIROCREW_FLOOR_PROBE" not in os.environ, "undo() must still revert the test's own records"
+        assert (
+            "KIROCREW_FLOOR_PROBE" not in os.environ
+        ), "undo() must still revert the test's own records"
         assert os.environ.get("KIROCREW_HOME") == pinned
         assert not _inside_a_guarded_root(pathlib.Path(pinned))
 
-    def test_undo_does_not_drop_the_other_pins_either(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        before = {k: os.environ.get(k) for k in ("KIROCREW_WORKSPACE", "KIROCREW_POD_ROOT", "KIROCREW_POD_ENV_DIR")}
+    def test_undo_does_not_drop_the_other_pins_either(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = {
+            k: os.environ.get(k)
+            for k in ("KIROCREW_WORKSPACE", "KIROCREW_POD_ROOT", "KIROCREW_POD_ENV_DIR")
+        }
         monkeypatch.setenv("KIROCREW_FLOOR_PROBE", "1")
 
         monkeypatch.undo()
@@ -1308,7 +1320,7 @@ class TestDynamicCredentialEnvironmentIsRestored:
     """A dynamic per-host Jira token must not leak to the next test.
 
     ``load_credentials`` propagates ``JIRA_TOKEN_<HEX>`` keys even though they are
-    not members of the fixed ``_CREDENTIAL_KEYS`` tuple, so the floor's restore has
+    not members of the fixed ``CREDENTIAL_KEYS`` tuple, so the floor's restore has
     to recognise the dynamic shape too — a snapshot bounded to the fixed keys would
     pass over it. The restore under test is ``conftest._no_credential_env_residue``'s
     own teardown, driven directly (see ``_autouse_floor_generator``).

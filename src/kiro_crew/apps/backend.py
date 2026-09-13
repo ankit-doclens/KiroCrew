@@ -1208,11 +1208,17 @@ def provision_app_deps(app_name: str, root: Path) -> str:
             # O_NOFOLLOW arm refuses a link planted at the lock name itself.
             # O_RDWR (not read-only): Windows msvcrt.locking requires write
             # access on the fd (same reason as bridges' _mcp_lock).
-            lflags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            if pin.fd is not None:
-                lfd = os.open(lock_path.name, lflags, 0o644, dir_fd=pin.fd)
-            else:
-                lfd = os.open(str(lock_path), lflags, 0o644)
+            lflags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            lock_name = lock_path.name if pin.fd is not None else str(lock_path)
+            # Concurrent openat(O_CREAT) of an absent file can return ENOENT on
+            # macOS. Elect one creator, then let contenders open its existing
+            # inode. Never recreate a lock that disappears before the reopen.
+            try:
+                lfd = os.open(
+                    lock_name, lflags | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=pin.fd
+                )
+            except FileExistsError:
+                lfd = os.open(lock_name, lflags, dir_fd=pin.fd)
             with os.fdopen(lfd, "r+") as lf:
                 with platform_compat.file_lock(lf.fileno(), exclusive=True):
                     provision_error = _provision_app_deps_locked(app_name, root, pin)
@@ -2646,6 +2652,34 @@ def spawned_backend_names() -> list[str]:
     """
     with _lock:
         return sorted(name for name, ap in _processes.items() if ap.proc is not None)
+
+
+def spawned_backend_owns_pid(pid: int) -> bool:
+    """Whether a backend THIS gateway spawned owns *pid*.
+
+    Owning means *pid* is the spawned root or descends from it, because
+    ``wrap_argv`` places a sandbox launcher between us and the real server —
+    the same ownership shape :func:`_spawn_owns_listener` reads off a listener.
+
+    Only a record holding a LIVE ``Popen`` answers, and that is the whole
+    security value: an unreaped child's pid cannot be recycled by the kernel, so
+    a root that answers here is a process this gateway started and still owns.
+    ``poll() is None`` is what carries that, not ``proc is not None`` on its own —
+    once a child exits and is reaped its pid is free for anyone. An ADOPTED
+    backend belongs to another supervisor and carries no handle at all (see
+    :func:`spawned_backend_names`), so it is refused rather than trusted on a pid
+    this gateway cannot vouch for.
+
+    The ancestry walk runs OUTSIDE ``_lock``: it reads ``/proc`` per candidate,
+    and the snapshot taken under the lock is all the registry state it needs.
+    """
+    with _lock:
+        roots = [
+            ap.pid
+            for ap in _processes.values()
+            if ap.proc is not None and ap.pid > 0 and ap.proc.poll() is None
+        ]
+    return any(_pid_is_self_or_descendant_of(pid, root) for root in roots)
 
 
 def get_app_backend_port(app_name: str) -> int | None:

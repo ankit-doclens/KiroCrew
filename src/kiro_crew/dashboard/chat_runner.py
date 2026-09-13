@@ -106,6 +106,7 @@ from kiro_crew.dashboard.chat_utils import (
     _remove_queued_by_id,
     _validate_tool_name,
     build_recovery_requeue,
+    chunk_generation,
     effective_session_key,
     expire_slack_options,
     is_harness_slash_command,
@@ -1050,7 +1051,7 @@ def _backfill_canonical_model(client: Any, provider: str) -> str:
     ``global.anthropic.claude-opus-4-8[1m]``) — not the alias the user picked —
     so backfilling it pins the slot to one profile + region. A session that once
     resolved to the 1M Opus profile then stays nailed to it across resumes even
-    when that profile is capacity-throttled, and the picker can no longer
+    when that profile is capacity-throttled, and the picker cannot
     dislodge the poisoned value (observed: every "model unavailable" throttle hit
     the profile-form id, never the dotted alias, which kiro routes with capacity
     awareness). So for non-``claude_code`` providers we DROP a profile-form id
@@ -1812,7 +1813,7 @@ def _mcp_server_name_is_ambiguous(server_name: str, safe_name: str) -> bool:
     ``server_name`` is stored REDACTED, because it is ACP-controlled and reaches
     chat content and the WS broadcast. :func:`_redact_acp_string` maps EVERY
     credential-shaped name onto one sentinel (``[REDACTED: credential]``), so once
-    redaction has fired the stored name no longer identifies a server: two
+    redaction has fired the stored name cannot identify a server: two
     unrelated servers can share it.
 
     Redaction firing at all is the exact test. A name that came through untouched
@@ -1902,7 +1903,7 @@ def _emit_mcp_oauth_request(
     authorization — the process whose loopback listener and PKCE verifier the
     URL is redeemable against. It is stamped into the banner meta so the
     read-time gate (`_expire_dead_child_oauth_meta`) can withdraw the link the
-    moment that child is no longer the live one serving the slot, HOWEVER it
+    moment that child ceases to be the live one serving the slot, HOWEVER it
     ended: gateway restart, session reset, idle sweep, RSS recycle, or the
     child exiting on its own. An empty value stamps nothing, and an unstamped
     banner is judged dead on first read — the fail direction that removes a
@@ -2001,7 +2002,7 @@ def _emit_mcp_oauth_request(
     # A new authorize request for this server means kiro-cli started a FRESH
     # flow, and the loopback listener plus the PKCE verifier live in that flow —
     # so every still-open banner for the same server now points at a callback
-    # port that can no longer redeem anything. Retire them before appending, or
+    # port that cannot redeem anything. Retire them before appending, or
     # the older button stays live-looking forever and sends the browser to a
     # dead port that answers with a bare `/?code=…` page.
     #
@@ -5925,6 +5926,12 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
     directive_user_origin = bool(consumed) and all(
         item.get("_directive_user_origin") is True for item in consumed
     )
+    # Channel authority is the narrower credential boundary. If batching combines
+    # channel and dashboard entries, the whole turn must retain that boundary so a
+    # directive derived from either message cannot inherit dashboard-owner secrets.
+    directive_channel_origin = bool(consumed) and any(
+        item.get("_directive_channel_origin") is True for item in consumed
+    )
     if slot._stopping and not is_system_injection:
         slot.append(
             "error",
@@ -6127,6 +6134,7 @@ async def _start_next_queued_turn(state: DashboardState, slot: _ChatSlot) -> boo
     _run_kwargs: dict[str, Any] = {
         "_synthetic_payload": synthetic_payload,
         "_directive_user_origin": directive_user_origin,
+        "_directive_channel_origin": directive_channel_origin,
     }
     if _settleable or _delivery_callbacks:
         _run_kwargs["_on_consumed"] = _note_consumed
@@ -6374,6 +6382,7 @@ async def _run_chat(
     # issues from inside that wake is its own act. Cron, app and sub-agent
     # injections never set it.
     _directive_self_wake: bool = False,
+    _directive_channel_origin: bool = False,
     regenerate_hint: str = "",
     _on_consumed: "Callable[[bool], None] | None" = None,
     _on_irreversibly_consumed: "Callable[[], Awaitable[None] | None] | None" = None,
@@ -6412,6 +6421,24 @@ async def _run_chat(
     # suspended and reset _stop_state to idle before continuation processing.
     # The monotonic generation preserves that user intent across the whole call.
     _stop_gen_at_entry = slot._stop_generation
+
+    def _stop_pressed() -> bool:
+        """The user's Stop signal for this turn, read LIVE at the call site.
+
+        True when a stop is in flight OR the monotonic stop generation moved since
+        entry -- a Stop that pressed and already resolved back to idle is invisible
+        to ``_stopping`` but not to the counter. The two end-of-turn continuation
+        gates (Stop-hook and refusal recovery) read THIS, never the backend's wire
+        stop reason: a backend that aborts a policy-denied turn (codex answers its
+        only reject option, ``cancel``, that way) reports ``cancelled`` with no
+        Stop pressed, and the continuation is owed there. A function rather than a
+        value so no gate can consume a snapshot taken before an await -- the Stop
+        hook and the credential-hint lookup both suspend between the turn's end
+        and the queue write.
+        """
+        return bool(getattr(slot, "_stopping", False)) or (
+            getattr(slot, "_stop_generation", _stop_gen_at_entry) != _stop_gen_at_entry
+        )
 
     session_key = effective_session_key(slot)
     sessions = getattr(state, "sessions", None)
@@ -6551,7 +6578,10 @@ async def _run_chat(
     # touches it between here and the flag block.
     _produced_visible_output = False
     last_heartbeat = time.time()
-    chunk_seq = 0
+    # Continues the slot's counter rather than starting at 0: seqs are ordered
+    # across turns so a client floor from an earlier turn sits below every
+    # chunk of this one (see _ChatSlot._chunk_seq).
+    chunk_seq = slot._chunk_seq
     in_tool_group = False
     # Whole-turn assistant-text buffer for orchestrator plan detection. Unlike
     # `assistant_text` (reset on every tool-call boundary), this is NEVER reset
@@ -6585,8 +6615,18 @@ async def _run_chat(
         if not wire:
             return
         chunk_seq += 1
-        slot.append("chunk", wire, "chunk")
-        state.broadcast_ws("chat_chunk", {"slot": slot.key, "content": wire, "seq": chunk_seq})
+        slot._chunk_seq = chunk_seq
+        # The window row carries the same seq (and process generation) as the
+        # wire frame so a slot snapshot taken mid-stream can tell the client how
+        # far the stream it already contains has advanced (see
+        # chat_utils._collapse_wire_rows / chunk_generation).
+        row = slot.append("chunk", wire, "chunk")
+        row["seq"] = chunk_seq
+        row["gen"] = chunk_generation()
+        state.broadcast_ws(
+            "chat_chunk",
+            {"slot": slot.key, "content": wire, "seq": chunk_seq, "gen": chunk_generation()},
+        )
 
     # Same rolling-buffer protection for the separate chat_thinking wire stream
     # (thinking is broadcast-only / ephemeral, but still real-time on the WS).
@@ -6753,6 +6793,7 @@ async def _run_chat(
                 _on_irreversibly_consumed if not _irreversible_consumption_reported else None
             ),
             directive_user_origin=_directive_user_origin,
+            directive_channel_origin=_directive_channel_origin,
         )
 
     # Model-activity marker for the poisoned-conversation streak ONLY:
@@ -7021,6 +7062,7 @@ async def _run_chat(
                     _prompt_depth=1,
                     _directive_user_origin=_directive_user_origin,
                     _directive_self_wake=_directive_self_wake,
+                    _directive_channel_origin=_directive_channel_origin,
                 )
             elif status == "blocked":
                 sel().log_tool_invocation(
@@ -8441,11 +8483,22 @@ async def _run_chat(
                 wire = _wsred.feed(event.text)
                 if wire:
                     chunk_seq += 1
-                    slot.append("chunk", wire, "chunk")
+                    slot._chunk_seq = chunk_seq
+                    # Same seq and generation on the window row as on the wire
+                    # frame (see _flush_text_stream) so a mid-stream snapshot
+                    # carries them.
+                    row = slot.append("chunk", wire, "chunk")
+                    row["seq"] = chunk_seq
+                    row["gen"] = chunk_generation()
                     # Push chunk to WS clients (HTTP SSE reader drains from slot._pending)
                     state.broadcast_ws(
                         "chat_chunk",
-                        {"slot": slot.key, "content": wire, "seq": chunk_seq},
+                        {
+                            "slot": slot.key,
+                            "content": wire,
+                            "seq": chunk_seq,
+                            "gen": chunk_generation(),
+                        },
                     )
             elif event.kind == EVENT_THINKING_CHUNK:
                 # Thinking content is not included in the main response text.
@@ -8970,6 +9023,7 @@ async def _run_chat(
                             dict(_oob.get("args") or {}),
                             producer_is_user_facing=_directive_user_origin,
                             producer_is_self_wake=_directive_self_wake,
+                            producer_is_channel=_directive_channel_origin,
                         )
                         _record_terminal_question(_applied_kind, _applied_one)
                         logger.info(
@@ -9159,6 +9213,7 @@ async def _run_chat(
                                 _dir_args,
                                 producer_is_user_facing=_directive_user_origin,
                                 producer_is_self_wake=_directive_self_wake,
+                                producer_is_channel=_directive_channel_origin,
                             )
                             _record_terminal_question(_dir_tool, _applied_one)
                             _out = _redact_tool_field(_applied_one)
@@ -12146,7 +12201,17 @@ async def _run_chat(
             # Resetting it on the recovery turn's completion would let a repeated
             # post-token 5xx during recovery re-queue forever.
 
-        if _stop_reason == STOP_REASON_CANCELLED:
+        if _stop_reason == STOP_REASON_CANCELLED and _refusal_reasons and not _stop_pressed():
+            # Not a user stop: the backend aborted the turn on the rejected tool
+            # (codex answers its only reject option, `cancel`, this way). Logged
+            # apart from the user case so an operator reading "cancelled by user"
+            # is not sent looking for a Stop press that never happened.
+            logger.info(
+                "Turn for slot %s aborted by the backend after a policy-blocked tool "
+                "call (stopReason=cancelled, no Stop pressed) -- refusal recovery follows",
+                slot.key,
+            )
+        elif _stop_reason == STOP_REASON_CANCELLED:
             logger.info("Turn cancelled by user for slot %s", slot.key)
         elif (
             not _retrying_empty
@@ -12227,14 +12292,12 @@ async def _run_chat(
         # override the Stop button. A configurable consecutive-turn backstop
         # bounds faulty always-block hooks; 0 explicitly disables that backstop.
         # The finally block's dequeue loop dispatches accepted continuations.
-        if should_queue_hook_continuation(slot._stopping, needs_session_reset, _stop_reason) and (
-            # Suppress if any user stop was initiated during this turn (streaming,
-            # completion persistence, or the hook _fire above): stop_turn()
-            # reporting "idle" resets _stop_state before this guard reads
-            # _stopping, but _stop_generation counts stop INITIATIONS and never
-            # rewinds, so an entry-vs-now delta is the durable signal.
-            slot._stop_generation
-            == _stop_gen_at_entry
+        # `user_stopped` is read live: a Stop initiated during this turn
+        # (streaming, completion persistence, or the hook _fire above) may have
+        # resolved already -- stop_turn() reporting "idle" resets _stop_state --
+        # and only the generation counter still says it happened.
+        if should_queue_hook_continuation(
+            slot._stopping, needs_session_reset, user_stopped=_stop_pressed()
         ):
             _hook_reasons = parse_hook_continuations(_stop_hook_out)
             # No block decision -> nothing to queue; skip the cap load and
@@ -12247,11 +12310,8 @@ async def _run_chat(
                 # Config loading yields to the event loop. Recheck the Stop
                 # boundary before mutating the queue so a Stop that lands during
                 # that await cannot be bypassed by the stale outer guard.
-                if (
-                    not should_queue_hook_continuation(
-                        slot._stopping, needs_session_reset, _stop_reason
-                    )
-                    or slot._stop_generation != _stop_gen_at_entry
+                if not should_queue_hook_continuation(
+                    slot._stopping, needs_session_reset, user_stopped=_stop_pressed()
                 ):
                     _hook_reasons = []
             else:
@@ -12334,11 +12394,17 @@ async def _run_chat(
         # third case, so the ordering answer-then-block gets the same awareness
         # body as block-then-answer instead of being told to continue and
         # re-deriving what is already on screen.
+        #
+        # The user-cancel input is the host's live Stop signal, not the wire
+        # stop reason: on codex the ONLY reject option a command approval
+        # advertises is `cancel`, which aborts the turn with stopReason
+        # "cancelled" -- the refusal's own consequence, not a Stop press, and
+        # this continuation is the only channel that still reaches its model.
         if should_queue_refusal_recovery(
             _refusal_reasons,
             slot._stopping,
             needs_session_reset,
-            _stop_reason,
+            user_stopped=_stop_pressed(),
             notices_sent=len(_refusal_notices) + _refusal_notices_settled,
             notices_pending=len(_refusal_notices),
         ):
@@ -12349,14 +12415,26 @@ async def _run_chat(
                 )
                 if _recovery_hint:
                     break
-            _recovery_body = build_refusal_recovery_prompt(
-                _refusal_reasons,
-                credential_tool_hint=_recovery_hint,
-                answered=(
-                    bool(_answer_text.strip())
-                    or _produced_visible_output
-                    or _turn_flushed_visible_text
-                ),
+            # The hint lookup above yields to the event loop. Re-read the Stop
+            # signal before the queue write, exactly as the hook-continuation
+            # gate does after its config load: a Stop that lands during that
+            # await must not be bypassed by the outer gate's earlier read.
+            _recovery_body = (
+                ""
+                if _stop_pressed()
+                else build_refusal_recovery_prompt(
+                    _refusal_reasons,
+                    credential_tool_hint=_recovery_hint,
+                    answered=(
+                        bool(_answer_text.strip())
+                        or _produced_visible_output
+                        or _turn_flushed_visible_text
+                    ),
+                    # The backend ended the blocked turn as cancelled: it will
+                    # tell the model the user interrupted, so the body must say
+                    # otherwise.
+                    turn_aborted=(_stop_reason == STOP_REASON_CANCELLED),
+                )
             )
             if _recovery_body:
                 _queue_recovery(

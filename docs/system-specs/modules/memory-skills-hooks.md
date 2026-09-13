@@ -1929,6 +1929,8 @@ claim of measured latency or RSS improvement on every supported platform.
 
 `ModelDownloadManager` (singleton via `model_download_manager()`) downloads the embedding GGUF in the BACKGROUND at gateway startup — boot is never blocked by the 610MB transfer:
 
+**Where the transfer lives.** The streamed-and-verified HTTPS transfer itself is `asset_downloader.download_to` (shared with hosted feature-video media, `feature-videos.md`): it owns connecting, hashing while streaming, the atomic install and the wording of each failure. `ModelDownloadManager` keeps everything that is about the MODEL — which url to resolve, the sha/size pins, the Ollama salvage, the retry ladder, and turning byte counts into the `status` dict. A second private downloader would be a second place for "did we verify this before installing it?" to be answered differently.
+
 **Download flow** (`ensure_model()` / `start_background_model_download()`):
 - **Salvage fast-path** (`_salvage_legacy_ollama_blob`): before downloading, checks the legacy Ollama blob store (`~/.ollama/models/blobs/sha256-<digest>`, honoring `$OLLAMA_MODELS`) — Ollama stores layer blobs content-addressed and the Ollama-era GGUF is byte-identical, so migrating users skip the 610MB re-download entirely. The copy is sha256-verified like a real download; any failure falls through to the normal download
 - Downloads `qwen3-embedding-0.6b-q8_0.gguf` (Q8_0 quantized, 610MB) over plain HTTPS from the public Kiro Crew CDN — URL resolution order: `KIROCREW_EMBED_MODEL_URL` env var, then the `memory.embed_model_url` config knob, then the built-in `_DEFAULT_MODEL_URL` CDN constant. No git, no cloud SDK. Streaming sha256 is computed while downloading and byte-level progress (`bytes_downloaded`/`bytes_total`) is written to `status` every ~16MB for the dashboard's determinate progress bar
@@ -3151,15 +3153,17 @@ requests, so ordinary requests reach the recipe without placing the whole body i
 every prompt. The base prompt points long-lived pull-request readiness requests to
 this skill and prefers the structured path whenever typed provider facts fully
 determine the objective.
-For a public GitHub pull request with the `review_ready` objective it gives the
-agent one exact bounded `monitor_watch` call and makes retained inspection state
-authoritative; its acknowledgement remains pending until the current turn ends,
-so agent inspection happens only at the start of a later user/wake turn. It also
-explains that reported-token enforcement may be incomplete while runtime and
-completed-turn limits remain hard fallbacks. It does not reproduce provider
-polling policy in the prompt. Its legacy `monitor_start` recipe is limited to
-unsupported targets and requires a positive cadence, cycle cap, and runtime
-bound while naming the full-turn/token cost and ordinary approval policy.
+For a supported GitHub, GitLab, Azure DevOps, or Bitbucket Cloud pull request
+with the `review_ready` objective it maps the canonical URL to one exact bounded
+`monitor_watch` call and makes retained inspection state authoritative; its
+acknowledgement remains pending until the current turn ends, so agent inspection
+happens only at the start of a later user/wake turn. It also explains that
+reported-token enforcement may be incomplete while runtime and completed-turn
+limits remain hard fallbacks. It does not reproduce provider polling policy in
+the prompt. Its legacy `monitor_start` recipe is limited to unsupported targets
+and requires a positive cadence, cycle cap, and runtime bound while naming the
+full-turn/token cost and ordinary approval policy. A supported provider's setup
+or authentication refusal never falls back to the costly legacy loop.
 
 **Loading:**
 1. **Always-on**: skills with `always: true` have full content injected every new session

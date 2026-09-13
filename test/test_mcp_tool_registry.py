@@ -70,7 +70,7 @@ def test_legacy_monitor_descriptors_route_structured_watches_correctly() -> None
     start = descriptors["monitor_start"].lower()
     assert "unsupported" in start
     assert "monitor_watch" in start
-    assert "github" in start
+    assert "supported pull-request" in start
 
     stop = descriptors["autonudge_stop"].lower()
     assert "structured" in stop
@@ -173,9 +173,7 @@ def test_no_unresolvable_free_names(domain: str) -> None:
             elif isinstance(node, ast.ExceptHandler) and node.name:
                 bound.add(node.name)
             elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-                bound.update(
-                    t.id for t in ast.walk(node.optional_vars) if isinstance(t, ast.Name)
-                )
+                bound.update(t.id for t in ast.walk(node.optional_vars) if isinstance(t, ast.Name))
             elif isinstance(node, ast.comprehension):
                 bound.update(t.id for t in ast.walk(node.target) if isinstance(t, ast.Name))
         loaded = {

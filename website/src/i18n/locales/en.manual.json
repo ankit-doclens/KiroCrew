@@ -93,6 +93,7 @@
       "transcript": {
         "empty": "No transcript yet",
         "emptyHintLive": "Final speech will appear here as the meeting continues.",
+        "emptyHintPaused": "Paused — speech will appear here after you resume.",
         "emptyHintRecorded": "No transcript was recorded for this meeting.",
         "full": "Transcript is full. New speech and broadcasts are no longer being recorded or sent to agents.",
         "jumpToLatest": "Jump to latest",
@@ -100,6 +101,16 @@
         "regionLabel": "Meeting transcript",
         "title": "Transcript",
         "typed": "Typed"
+      },
+      "meeting": {
+        "endingReview": "Ending — preparing review…",
+        "pausing": "Pausing…",
+        "resuming": "Resuming…"
+      },
+      "broadcastBar": {
+        "pausedPlaceholder": "Agents paused — resume to send",
+        "pausingPlaceholder": "Pausing — sending is unavailable",
+        "resumingPlaceholder": "Resuming — sending will be available shortly"
       }
     },
     "autoResearch": {
@@ -1148,6 +1159,12 @@
         "font_specimen": "Aa"
       }
     },
+    "projectScaffolder": {
+      "projectScaffolderPage": {
+        "n_already_set_up": "{{n}} already set up",
+        "root_already_exists_nothing_to_create": "This directory already has its sidebar folder, so there is nothing left to create."
+      }
+    },
     "designCritique": {
       "constants": {
         "blocked_figma_app_missing_hint": "Open the file in Figma desktop and try again, or export the frames as PNGs and drop them here.",
@@ -1281,7 +1298,7 @@
     },
     "avatarBuilder": {
       "apply": "Apply",
-      "apply_hint": "Applies here — press “Save changes” to keep it.",
+      "apply_hint": "Applies here — press “Save changes” in the crew editor to keep it.",
       "axis_accessory": "Headwear",
       "axis_blush": "Blush",
       "axis_brows": "Brows",
@@ -1302,6 +1319,7 @@
       "hint_customize": "Edit this avatar",
       "image_load_failed": "The saved picture could not be loaded — showing the default face instead.",
       "lib_badge_builtin": "Built-in",
+      "lib_art_failed": "Art won't draw. Use “Import pack”.",
       "lib_badge_custom": "Custom",
       "lib_by_author": "Author: {{author}}",
       "lib_delete": "Delete",
@@ -1314,17 +1332,15 @@
       "lib_format_lottie": "Lottie",
       "lib_format_sprite": "Sprite",
       "lib_format_svg": "SVG",
-      "lib_hint": "A pack is a ready-made set of faces for a crew, drawn by someone else. Only SVG packs can be a crew face for now.",
+      "lib_hint": "A pack is a ready-made set of faces for a crew, drawn by someone else. Pick one to put it on this crew: a still drawing, an animation, or animated pixel art. Animated ones move while the crew is working.",
       "lib_import": "Import pack (.json)…",
       "lib_import_too_large": "That pack file is too big. The limit is 24 MB.",
       "lib_import_unreadable": "That file is not a pack bundle.",
-      "lib_import_unwearable": "That pack is installed, but a crew can only wear an SVG pack.",
       "lib_in_use": "{{name}} was not deleted — it is still worn by: {{crews}}",
       "lib_in_use_unknown": "{{name}} was not deleted — a crew is still wearing it.",
       "lib_loading": "Loading packs…",
       "lib_retry": "Try again",
       "lib_selected": "Selected",
-      "lib_unsupported": "Not supported for crews yet",
       "mirror": "Flip direction",
       "mode_expressions": "Expressions",
       "mode_face": "Ghost face",
@@ -2953,6 +2969,8 @@
       "confirm_stop": "Confirm stop",
       "description": "Probe cheaply, then wake the agent only when review work is actionable.",
       "enter_pull_request_url": "Enter a pull request URL.",
+      "gitlab_host_not_allowed": "This GitLab host isn't allowed yet. Add it to dashboard.gitlab_hosts in ~/.kiro/crew/config.json.",
+      "invalid_pull_request_url": "Enter a supported pull request URL.",
       "latest_classification": "Latest classification",
       "latest_decision": "Latest decision",
       "limit_range": "Enter a whole number from {{min}} to {{max}}.",
@@ -2967,15 +2985,16 @@
       "objective": "Objective",
       "probe_cadence": "Probe cadence in seconds",
       "probes": "Probes: {{count}}",
+      "provider_change_requires_new_monitor": "This monitor is tied to its current code host. Watch the new link from a new session.",
       "provider_errors": "Provider errors: {{count}}",
       "pull_request_url": "Pull request URL",
       "pull_request_url_placeholder": "e.g. https://github.com/org/repo/pull/123…",
       "request_failed": "The monitor request failed. Try again.",
-      "session_mode_unavailable": "Monitors aren't available in crew or member sessions because those sessions route work through their crew.",
+      "session_mode_unavailable": "Automations aren't available in crew or member sessions because those sessions route work through their crew.",
       "restart_monitor": "Restart monitor",
       "review_ready": "Review ready",
       "save_changes": "Save changes",
-      "set_up_bounded_monitor": "Set up a bounded monitor",
+      "set_up_bounded_monitor": "Watch a pull request instead",
       "sidebar_status": "Monitor · {{status}}",
       "start_monitor": "Start monitor",
       "statuses": {
@@ -2988,14 +3007,14 @@
         "success": "succeeded",
         "user_stopped": "stopped"
       },
+      "supported_source_providers": "GitHub.com, GitLab, Azure DevOps Services, and Bitbucket Cloud are supported.",
       "stop_monitor": "Stop monitor",
       "terminal_reason": "Terminal reason",
       "title": "Bounded pull request monitor",
       "tokens": "Tokens: {{count}}",
       "unknown": "Unknown",
-      "back_to_bounded_monitor": "Back to bounded monitor",
-      "legacy_notice": "This legacy loop invokes the agent every cycle and can run without a limit.",
-      "use_legacy_costly": "Use legacy goal loop (costly)",
+      "legacy_notice": "This goal loop invokes the agent every cycle and can run without a limit.",
+      "use_legacy_costly": "Back to goal loop",
       "wake_instructions": "Instructions for the agent when it wakes",
       "wake_instructions_too_long": "Enter no more than {{max}} characters.",
       "wakes": "Wakes: {{count}}",
@@ -5032,7 +5051,9 @@
       "secrets_pending_title": "Agent requested secrets",
       "secrets_section": "Vault secrets",
       "secrets_revoke_all": "Revoke all secrets",
-      "secrets_revoke_all_confirm": "Revoke all?"
+      "secrets_revoke_all_confirm": "Revoke all?",
+      "retried_n_times_one": "Retried {{count}} time",
+      "retried_n_times_other": "Retried {{count}} times"
     },
     "servicesTab": {
       "channels": "Channels",
@@ -6103,6 +6124,10 @@
       "plainDiff": {
         "description": "Render diffs as plain unified-diff text instead of syntax-highlighted colour. Uses less memory on large diffs.",
         "label": "Plain diffs"
+      },
+      "diffLayout": {
+        "description": "Show old and new code in two columns; off shows one unified column. Changing it here or on any diff sets it everywhere.",
+        "label": "Split (side-by-side) diffs"
       }
     },
     "display": {
@@ -6330,6 +6355,10 @@
   },
   "store": {
     "chatSlice": {
+      "session_gone_open_failed": "The session you clicked was deleted and cannot be opened.",
+      "session_open_error_named": "“{{name}}” could not be opened.",
+      "session_open_error": "The session could not be opened.",
+      "session_gone_open_failed_named": "“{{name}}” was deleted and cannot be opened.",
       "truncated": "…(truncated)"
     }
   },

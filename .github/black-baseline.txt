@@ -125,12 +125,10 @@ src/kiro_crew/apps/builtins/papyrus/backend/gitops.py
 src/kiro_crew/apps/builtins/papyrus/backend/latex.py
 src/kiro_crew/apps/builtins/papyrus/backend/routes.py
 src/kiro_crew/apps/builtins/papyrus/backend/store.py
-src/kiro_crew/apps/builtins/papyrus/backend/tectonic.py
 src/kiro_crew/apps/builtins/personal_shopper/backend/routes.py
 src/kiro_crew/apps/builtins/personal_shopper/backend/store.py
 src/kiro_crew/apps/builtins/personal_shopper/tests/test_routes.py
 src/kiro_crew/apps/builtins/personal_shopper/tests/test_store.py
-src/kiro_crew/apps/builtins/pptx_maker/backend/engine_source.py
 src/kiro_crew/apps/builtins/pptx_maker/backend/library.py
 src/kiro_crew/apps/builtins/workflows/server.py
 src/kiro_crew/apps/cron_sdk.py
@@ -183,7 +181,6 @@ src/kiro_crew/dashboard/handlers/artifacts.py
 src/kiro_crew/dashboard/handlers/ask_question.py
 src/kiro_crew/dashboard/handlers/discover.py
 src/kiro_crew/dashboard/handlers/files.py
-src/kiro_crew/dashboard/handlers/hooks.py
 src/kiro_crew/dashboard/handlers/kiro_usage_api.py
 src/kiro_crew/dashboard/handlers/knowledge.py
 src/kiro_crew/dashboard/handlers/mcp.py
@@ -213,7 +210,6 @@ src/kiro_crew/dashboard/terminal_commands.py
 src/kiro_crew/dashboard/theme_validate.py
 src/kiro_crew/dashboard/token_secret.py
 src/kiro_crew/dashboard/ws_event_scope.py
-src/kiro_crew/deploy/__init__.py
 src/kiro_crew/deploy/engine.py
 src/kiro_crew/deploy/handlers.py
 src/kiro_crew/deploy/pricing.py
@@ -237,10 +233,8 @@ src/kiro_crew/eval/runner.py
 src/kiro_crew/eval/scenario.py
 src/kiro_crew/frontend.py
 src/kiro_crew/gateway_shutdown_budget.py
-src/kiro_crew/github_runner.py
 src/kiro_crew/image_artifacts.py
 src/kiro_crew/imaging.py
-src/kiro_crew/kiro_prerequisite.py
 src/kiro_crew/knowledge/agent_fetch.py
 src/kiro_crew/knowledge/agent_source.py
 src/kiro_crew/knowledge/artifact_ingest.py
@@ -502,12 +496,10 @@ test/test_context_ui_language.py
 test/test_continuable_followups.py
 test/test_crash_dump_store.py
 test/test_crash_guard.py
-test/test_credential_scrub_sync.py
 test/test_cron.py
 test/test_cron_acp_retry.py
 test/test_cron_approval_mode.py
 test/test_cron_arbiter_items.py
-test/test_cron_autopause_persist.py
 test/test_cron_cancel.py
 test/test_cron_context_meter_seed.py
 test/test_cron_count_from_disk.py
@@ -525,14 +517,12 @@ test/test_cron_slack_delivery.py
 test/test_cron_thread_routing.py
 test/test_cron_timezone_display.py
 test/test_cron_trigger.py
-test/test_cron_wake_budget.py
 test/test_cse_2026_08_05_fixes.py
 test/test_cse_2026_08_07_fixes.py
 test/test_custom_embedding_model.py
 test/test_dashboard.py
 test/test_dashboard_branding.py
 test/test_dashboard_config_gitlab_hosts.py
-test/test_dashboard_cron_approval.py
 test/test_dashboard_cron_batch_delete_handler.py
 test/test_dashboard_cron_concurrent_create.py
 test/test_dashboard_file_io.py
@@ -673,7 +663,6 @@ test/test_history_locking_remediation.py
 test/test_history_race.py
 test/test_hook_matcher_modes.py
 test/test_hooks_json_shared_file.py
-test/test_host_isolation_floor.py
 test/test_host_service_guard.py
 test/test_image_artifacts.py
 test/test_inbound_unbind_notice.py
@@ -701,7 +690,6 @@ test/test_issue_summary_workflow.py
 test/test_issue_triage_workflow.py
 test/test_kas_display_mapping.py
 test/test_kas_subagent_progress.py
-test/test_kiro_prerequisite.py
 test/test_kiro_usage_api.py
 test/test_knowledge.py
 test/test_knowledge_add_source.py
@@ -788,7 +776,6 @@ test/test_mcp_skill_registry.py
 test/test_mcp_stub_freeze_ratchet.py
 test/test_mcp_stub_migration.py
 test/test_mcp_sync_agent.py
-test/test_mcp_tool_registry.py
 test/test_md_notebook.py
 test/test_meetings_agent_names.py
 test/test_meetings_dictionary.py
@@ -1078,7 +1065,6 @@ test/test_workflows_agent_pool.py
 test/test_workflows_dsl.py
 test/test_workflows_inject.py
 test/test_workflows_invariants.py
-test/test_workflows_nudge_wiring.py
 test/test_workflows_resilience.py
 test/test_workflows_run_bounds.py
 test/test_workflows_runner.py

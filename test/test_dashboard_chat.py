@@ -5714,6 +5714,111 @@ class TestRunChatSegmentFlush:
             assert seq_values[i] > seq_values[i - 1], f"seq not monotonic: {seq_values}"
         assert "".join(contents) == "abcd", f"content lost in stream buffer: {contents}"
 
+    @pytest.mark.asyncio
+    async def test_chunk_seq_continues_across_turns(self, tmp_path, monkeypatch):
+        """The seq counter is the SLOT's, not the turn's: the second turn's first
+        chunk is numbered above the first turn's last. A client's replay floor
+        (the newest seq its transcript holds) then orders every later chunk above
+        it, whether or not the client saw the turn boundary -- a snapshot or a
+        `_done` lost to a reconnect cannot make the next turn's chunks read as
+        replays of the finished one."""
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        from kiro_crew.dashboard.chat import _run_chat
+
+        def seqs() -> list[int]:
+            return [
+                c.args[1]["seq"]
+                for c in state.broadcast_ws.call_args_list
+                if c.args[0] == "chat_chunk"
+            ]
+
+        client = self._make_mock_client(
+            [LLMEvent(kind=EVENT_TEXT_CHUNK, text="one"), LLMEvent(kind=EVENT_COMPLETE)]
+        )
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        await _run_chat(state, slot, "first")
+        first_turn = seqs()
+        assert first_turn, "no chat_chunk broadcasts in the first turn"
+
+        client = self._make_mock_client(
+            [LLMEvent(kind=EVENT_TEXT_CHUNK, text="two"), LLMEvent(kind=EVENT_COMPLETE)]
+        )
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        await _run_chat(state, slot, "second")
+        second_turn = seqs()[len(first_turn) :]
+        assert second_turn, "no chat_chunk broadcasts in the second turn"
+        assert second_turn[0] > first_turn[-1], (first_turn, second_turn)
+        # Every frame names the process generation that numbered it, so a client
+        # can drop a floor from before a gateway restart instead of comparing.
+        from kiro_crew.dashboard.chat_utils import chunk_generation
+
+        gens = {
+            c.args[1].get("gen")
+            for c in state.broadcast_ws.call_args_list
+            if c.args[0] == "chat_chunk"
+        }
+        assert gens == {chunk_generation()}
+
+    @pytest.mark.asyncio
+    async def test_window_chunk_rows_carry_the_wire_seq(self, tmp_path, monkeypatch):
+        """Each window ``chunk`` row is stamped with its wire frame's ``seq``.
+
+        A slot snapshot taken mid-stream folds those rows into one ``streaming``
+        row carrying the newest seq (chat_utils), which the client seeds its
+        replay guard from; a row without the stamp would leave the snapshot
+        unable to say how far the stream it holds has advanced.
+        """
+        from kiro_crew.providers.base import (
+            EVENT_COMPLETE,
+            EVENT_TEXT_CHUNK,
+            EVENT_TOOL_CALL,
+            LLMEvent,
+        )
+
+        events = [
+            LLMEvent(kind=EVENT_TEXT_CHUNK, text="a"),
+            LLMEvent(kind=EVENT_TOOL_CALL, title="read_file", tool_kind="read"),
+            LLMEvent(kind=EVENT_TEXT_CHUNK, text="b"),
+            LLMEvent(kind=EVENT_COMPLETE),
+        ]
+
+        state = self._make_state_for_run_chat(tmp_path, monkeypatch)
+        slot = state.get_or_create_slot("s1")
+        # Wrapped on the CLASS: `_ChatSlot` is slotted, and the window list is
+        # rebuilt at the segment flush (chunk rows are dropped from it), so
+        # neither an instance patch nor reading `slot.messages` afterwards sees
+        # every chunk row the runner appended.
+        from kiro_crew.dashboard.state import _ChatSlot
+
+        appended: list[dict] = []
+        real_append = _ChatSlot.append
+
+        def recording_append(self_slot, role, content, cls="", *args, **kwargs):
+            row = real_append(self_slot, role, content, cls, *args, **kwargs)
+            if role == "chunk":
+                appended.append(row)
+            return row
+
+        monkeypatch.setattr(_ChatSlot, "append", recording_append)
+
+        client = self._make_mock_client(events)
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+
+        from kiro_crew.dashboard.chat import _run_chat
+
+        await _run_chat(state, slot, "hello")
+
+        wire = [
+            (c.args[1]["seq"], c.args[1]["content"])
+            for c in state.broadcast_ws.call_args_list
+            if c.args[0] == "chat_chunk"
+        ]
+        assert wire, "no chat_chunk broadcasts"
+        assert [(r["seq"], r["content"]) for r in appended] == wire
+
 
 class TestRunChatNativeSubagentAttribution:
     """End-to-end: native (use_subagent) sub-agent tool calls + results are
@@ -16743,6 +16848,7 @@ class TestEmptyResponseRetry:
         calls = []
         callbacks = []
         directive_origins = []
+        directive_channel_origins = []
         on_consumed = MagicMock()
         orig = _ChatSlot.queue_insert
 
@@ -16750,6 +16856,7 @@ class TestEmptyResponseRetry:
             calls.append(a)
             callbacks.append(kw.get("on_consumed"))
             directive_origins.append(kw.get("directive_user_origin"))
+            directive_channel_origins.append(kw.get("directive_channel_origin"))
             return orig(self_slot, *a, **kw)
 
         with (
@@ -16772,6 +16879,7 @@ class TestEmptyResponseRetry:
                 slot,
                 "test message",
                 _directive_user_origin=True,
+                _directive_channel_origin=True,
                 _on_consumed=on_consumed,
             )
             background_tasks = list(state._background_tasks)
@@ -16785,6 +16893,7 @@ class TestEmptyResponseRetry:
         assert (0, "test message") in calls
         assert callbacks[0] is on_consumed
         assert directive_origins == [True]
+        assert directive_channel_origins == [True]
         assert [args.args for args in on_consumed.call_args_list] == [(True,), (False,)]
         # No notice card shown on first attempt — the empty is silently re-queued
         notice_msgs = [m for m in slot.messages if m.get("role") == "notice"]
